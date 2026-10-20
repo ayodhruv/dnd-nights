@@ -1,0 +1,42 @@
+services:
+  - type: worker
+    name: dnd-nights-live-bot
+    runtime: python
+    plan: 0.5c-512mb
+    region: singapore
+    rootDir: telegram-bot/live
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    numInstances: 1
+    autoDeployTrigger: "off"
+    disk:
+      name: dnd-live-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: DATA_DIR
+        value: /var/data
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_IDS
+        value: "5117903901"
+      - key: SALES_OPEN
+        value: "false"
+      - key: PAYNOW_QR_BASE64
+        sync: false
+      - key: PAYNOW_RECIPIENT_NAME
+        sync: false
+      - key: EVENT_TERMS
+        sync: false
+      - key: EVENT_CAPACITY
+        value: "230"
+      - key: EVENT_ID
+        value: DND26
+      - key: EVENT_DATE
+        value: "2026-11-28"
+      - key: EARLY_BIRD_CUTOFF
+        value: "2026-11-14"

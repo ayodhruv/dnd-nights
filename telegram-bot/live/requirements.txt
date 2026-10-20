@@ -1,0 +1,5 @@
+python-telegram-bot==22.8
+python-dotenv>=1.2,<2
+qrcode[pil]>=8.2,<9
+tzdata
+pillow>=10.1,<14
