@@ -28,13 +28,23 @@ BOT_USERNAME=''
 
 def payment_image():
     # Prefer a private hosting variable; never commit a personal receiving QR.
+    payload=os.getenv('PAYNOW_QR_PAYLOAD','')
+    if payload:
+        if len(payload)>4096 or not payload.startswith('000201') or any(ord(c)<32 for c in payload):
+            raise ValueError('Invalid PayNow QR payload. Copy it using the QR extraction command.')
+        import binascii
+        if payload[-8:-4]!='6304' or f'{binascii.crc_hqx(payload[:-4].encode(),0xFFFF):04X}'!=payload[-4:].upper():
+            raise ValueError('Payment QR checksum mismatch. Copy the full payload again.')
+        image=qrcode.make(payload)
+        result=io.BytesIO();image.save(result,format='PNG');result.seek(0)
+        return result
     encoded=os.getenv('PAYNOW_QR_BASE64','').strip()
     if encoded:
         try:data=base64.b64decode(encoded,validate=True)
         except Exception:raise ValueError('PAYNOW_QR_BASE64 is not valid base64.') from None
     else:
         path=ROOT/'paynow.png'
-        if not path.is_file():raise ValueError('Set private PAYNOW_QR_BASE64 or add local paynow.png.')
+        if not path.is_file():raise ValueError('Set private PAYNOW_QR_PAYLOAD or add local paynow.png.')
         data=path.read_bytes()
     if len(data)>2000000:raise ValueError('Payment QR file is too large.')
     Image.open(io.BytesIO(data)).verify()
@@ -285,7 +295,7 @@ if __name__=='__main__':
     if not token or not ADMINS:raise SystemExit('Set TELEGRAM_BOT_TOKEN and ADMIN_USER_IDS in the hosting environment.')
     if opened() and (not os.getenv('PAYNOW_RECIPIENT_NAME','').strip() or not os.getenv('EVENT_TERMS','').strip()):raise SystemExit('Set verified PAYNOW_RECIPIENT_NAME and EVENT_TERMS before opening sales.')
     try:payment_image()
-    except (ValueError,OSError):raise SystemExit('Add a valid private PAYNOW_QR_BASE64 in Render, or local paynow.png.')
+    except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render, or local paynow.png.')
     ledger=Ledger(DATA/'dnd-live.sqlite3',int(os.getenv('EVENT_CAPACITY','230')),os.getenv('EVENT_ID','DND26'))
     app=Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(shutdown).build()
     for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd)]:app.add_handler(CommandHandler(cmd,fn))

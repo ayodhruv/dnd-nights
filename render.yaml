@@ -26,7 +26,7 @@ services:
         value: "5117903901"
       - key: SALES_OPEN
         value: "false"
-      - key: PAYNOW_QR_BASE64
+      - key: PAYNOW_QR_PAYLOAD
         sync: false
       - key: PAYNOW_RECIPIENT_NAME
         sync: false

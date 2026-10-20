@@ -23,13 +23,16 @@ Hosting is a paid background worker with a 1 GB persistent disk, one instance. R
 2. New -> Blueprint -> connect `ayodhruv/dnd-nights`, branch `main`, Blueprint Path `render.yaml`.
 3. Review the worker/disk charges. The blueprint uses `rootDir: telegram-bot/live`, build `pip install -r requirements.txt`, start `python app.py`, Singapore region, disk `/var/data`.
 4. Set the secret `TELEGRAM_BOT_TOKEN` in Render, privately. Keep admin ID `5117903901` (comma-separated for extra staff).
-5. Add private `PAYNOW_QR_BASE64` in Render. On your desktop, in the folder containing your paynow.png, run:
+5. Add private `PAYNOW_QR_PAYLOAD` in Render. On your desktop, in the folder containing your paynow.png, run:
+
+   In the desktop's existing telegram-bot folder, install the extraction helper (desktop only):
 
    ```powershell
-   Set-Clipboard ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path .\paynow.png).Path)))
+   .\.venv\Scripts\python.exe -m pip install zxing-cpp
+   Set-Clipboard (.\.venv\Scripts\python.exe -c "import zxingcpp; from PIL import Image; r=zxingcpp.read_barcode(Image.open('paynow.png')); assert r is not None, 'QR not readable'; print(r.text)")
    ```
 
-   This copies the receiving QR bytes to your clipboard without displaying them. Paste into Render's variable value, save, then clear your clipboard. Do not paste into chat or GitHub. The QR is not in the public repo. Locally you can instead place paynow.png beside app.py.
+   Paste the clipboard into Render's PAYNOW_QR_PAYLOAD variable. DELETE any old PAYNOW_QR_BASE64 variable before building: a full image as a variable can exceed Linux exec limits and cause `argument list too long` before Python even starts. The payload is the much smaller original QR text. The server checks its CRC and recreates a QR with exactly that payload; no receiving destination, amount or reference is changed. The image/payload are not in the public repo. Locally you can instead place paynow.png beside app.py.
 
    Set `PAYNOW_RECIPIENT_NAME` to the exact name verified when scanning your QR. Set `EVENT_TERMS` to your actual venue, admission conditions, support/refund/cancellation terms. These are shown before booking; do not invent policies.
 6. Keep `SALES_OPEN=false` for the first deployment. Stop every local bot using this token before starting the worker. An existing webhook blocks startup; do not delete it without first stopping its backend.
