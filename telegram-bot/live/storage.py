@@ -1,6 +1,7 @@
 """Single-event live ledger. Every payment/seat/check-in mutation is transactional."""
 import json
 import hashlib
+import re
 import secrets
 import sqlite3
 import unicodedata
@@ -27,6 +28,7 @@ class Ledger:
               CREATE TABLE IF NOT EXISTS door_staff(user_id INTEGER PRIMARY KEY,granted_by INTEGER NOT NULL,created_at TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS contacts(user_id INTEGER PRIMARY KEY);
+              CREATE TABLE IF NOT EXISTS promoters(code TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS drafts(user_id INTEGER PRIMARY KEY,state TEXT NOT NULL,data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS orders(
                 serial TEXT PRIMARY KEY,user_id INTEGER NOT NULL,day TEXT NOT NULL,seq INTEGER NOT NULL,
@@ -48,6 +50,9 @@ class Ledger:
             if existing and existing[0] != event_id:
                 raise ValueError('This database belongs to a different event.')
             db.execute("INSERT OR IGNORE INTO meta VALUES('event_id',?)", (event_id,))
+            # Starting roster from the DND Promoters sheet; later codes can be added by staff.
+            for code,name in (('DND-ADEEP','Adeep'),('DND-NIRBHAY','Nirbhay')):
+                db.execute('INSERT OR IGNORE INTO promoters VALUES(?,?,?)',(code,name,now().isoformat()))
     def db(self):
         db=sqlite3.connect(self.path,timeout=20)
         db.row_factory=sqlite3.Row
@@ -73,7 +78,11 @@ class Ledger:
             if not r or r['state']!='confirm':raise ValueError('This confirmation is old. Use /orders.')
             d=json.loads(r['data']);qty=d['quantity']
             if (d['tier'],d['price'])!=expected_offer:raise ValueError('The offer changed. Please start again with /buy.')
-            if qty not in (1,2):raise ValueError('Invalid quantity.')
+            if type(qty) is not int or not 1<=qty<=10:raise ValueError('Choose 1 to 10 tickets.')
+            if d.get('source')=='Promoter':
+                code=d.get('promoter_code','').strip().upper()
+                if not db.execute('SELECT 1 FROM promoters WHERE code=?',(code,)).fetchone():
+                    raise ValueError('Unknown promoter code. Ask your promoter for their code.')
             active=db.execute("SELECT serial FROM orders WHERE user_id=? AND status IN ('pending','review','review_late')",(user,)).fetchone()
             if active:raise ValueError('You already have an unpaid booking. Use /orders or /help.')
             occupied=db.execute("SELECT COALESCE(SUM(quantity),0) FROM orders WHERE status IN ('pending','review','paid')").fetchone()[0]
@@ -187,6 +196,30 @@ class Ledger:
         with self.db() as db:db.execute('INSERT OR IGNORE INTO contacts VALUES(?)',(user,))
     def known(self,user):
         with self.db() as db:return bool(db.execute('SELECT 1 FROM contacts WHERE user_id=?',(user,)).fetchone())
+
+    def promoter(self,code):
+        with self.db() as db:return db.execute('SELECT * FROM promoters WHERE code=?',(code.strip().upper(),)).fetchone()
+    def add_promoter(self,code,name,admin):
+        code=code.strip().upper();name=name.strip()
+        if not re.fullmatch(r'DND-[A-Z0-9-]{2,32}',code) or not 2<=len(name)<=80:
+            raise ValueError('Use /addpromoter DND-CODE Promoter name.')
+        with self.db() as db:
+            try:db.execute('INSERT INTO promoters VALUES(?,?,?)',(code,name,now().isoformat()))
+            except sqlite3.IntegrityError:raise ValueError('That promoter code already exists.') from None
+            self.audit(db,None,'promoter_added',admin,code)
+    def promoter_stats(self):
+        with self.db() as db:
+            promoters=[dict(r) for r in db.execute('SELECT code,name FROM promoters ORDER BY name')]
+            for p in promoters:p.update(booked=0,paid=0,checked_in=0)
+            index={p['code']:p for p in promoters}
+            for r in db.execute("SELECT details,quantity,status,serial FROM orders WHERE status IN ('pending','review','review_late','paid')"):
+                code=json.loads(r['details']).get('promoter_code','')
+                if code not in index:continue
+                index[code]['booked']+=r['quantity']
+                if r['status']=='paid':
+                    index[code]['paid']+=r['quantity']
+                    index[code]['checked_in']+=db.execute('SELECT COUNT(*) FROM tickets WHERE serial=? AND used_at IS NOT NULL',(r['serial'],)).fetchone()[0]
+            return promoters
 
     def door_authorized(self,user,admins):
         if user in admins:return True

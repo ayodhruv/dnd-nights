@@ -1,11 +1,12 @@
 """Public DND Nights bot: PayNow with staff bank verification. One polling process."""
-import base64
+import binascii
 import asyncio
 import io
 import json
 import logging
 import os
 import re
+from html import escape
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -27,29 +28,46 @@ DATA=Path(os.getenv('DATA_DIR',str(ROOT/'data')))
 ledger=None
 BOT_USERNAME=''
 
-def payment_image():
-    # Prefer a private hosting variable; never commit a personal receiving QR.
+def payment_image(total_cents):
+    """Change only the EMV amount and CRC of the private UOB PayNow payload."""
     payload=os.getenv('PAYNOW_QR_PAYLOAD','')
-    if payload:
-        if len(payload)>4096 or not payload.startswith('000201') or any(ord(c)<32 for c in payload):
-            raise ValueError('Invalid PayNow QR payload. Copy it using the QR extraction command.')
-        import binascii
-        if payload[-8:-4]!='6304' or f'{binascii.crc_hqx(payload[:-4].encode(),0xFFFF):04X}'!=payload[-4:].upper():
-            raise ValueError('Payment QR checksum mismatch. Copy the full payload again.')
-        image=qrcode.make(payload)
-        result=io.BytesIO();image.save(result,format='PNG');result.seek(0)
+    if not payload or len(payload)>4096 or not payload.startswith('000201') or any(ord(c)<32 for c in payload):
+        raise ValueError('Set the private original UOB PAYNOW_QR_PAYLOAD.')
+    if payload[-8:-4]!='6304' or f'{binascii.crc_hqx(payload[:-4].encode(),0xFFFF):04X}'!=payload[-4:].upper():
+        raise ValueError('Payment QR checksum mismatch.')
+    if not 1<=total_cents<=999999:raise ValueError('Payment amount is out of range.')
+    def parse(tlv):
+        result=[];pos=0
+        while pos<len(tlv):
+            if pos+4>len(tlv):raise ValueError('Malformed PayNow QR.')
+            tag=tlv[pos:pos+2]
+            try:length=int(tlv[pos+2:pos+4])
+            except ValueError:raise ValueError('Malformed PayNow QR.') from None
+            value=tlv[pos+4:pos+4+length]
+            if len(value)!=length:raise ValueError('Malformed PayNow QR.')
+            result.append((tag,value));pos+=4+length
         return result
-    encoded=os.getenv('PAYNOW_QR_BASE64','').strip()
-    if encoded:
-        try:data=base64.b64decode(encoded,validate=True)
-        except Exception:raise ValueError('PAYNOW_QR_BASE64 is not valid base64.') from None
-    else:
-        path=ROOT/'paynow.png'
-        if not path.is_file():raise ValueError('Set private PAYNOW_QR_PAYLOAD or add local paynow.png.')
-        data=path.read_bytes()
-    if len(data)>2000000:raise ValueError('Payment QR file is too large.')
-    Image.open(io.BytesIO(data)).verify()
-    return io.BytesIO(data)
+    def encode(fields):return ''.join(f'{tag}{len(value):02d}{value}' for tag,value in fields)
+    fields=parse(payload)
+    tags=dict(fields)
+    if tags.get('53')!='702' or tags.get('58')!='SG' or '26' not in tags or fields[-1][0]!='63':
+        raise ValueError('Expected a Singapore PayNow QR.')
+    merchant=parse(tags['26']);merchant_tags=dict(merchant)
+    if merchant_tags.get('00')!='SG.PAYNOW' or merchant_tags.get('03') not in ('0','1'):
+        raise ValueError('Unsupported PayNow QR amount setting.')
+    # The UOB amount-specific QRs supplied by the organiser set 26.03 to 0.
+    # This changes an editable base QR into the exact fixed-amount UOB variant.
+    merchant=encode([(tag,'0' if tag=='03' else value) for tag,value in merchant])
+    amount=f'{total_cents/100:.2f}'
+    fields=[(tag,merchant if tag=='26' else amount if tag=='54' else value) for tag,value in fields if tag!='63']
+    if '54' not in tags:
+        currency_index=next(i for i,(tag,_) in enumerate(fields) if tag=='53')
+        fields.insert(currency_index+1,('54',amount))
+    output=encode(fields)+'6304'
+    output+=f'{binascii.crc_hqx(output.encode(),0xFFFF):04X}'
+    image=qrcode.make(output)
+    result=io.BytesIO();image.save(result,format='PNG');result.seek(0)
+    return result
 
 def opened():return os.getenv('SALES_OPEN','false').lower()=='true'
 def offer():
@@ -58,7 +76,11 @@ def offer():
     if today==event:return 'Walk-in',35
     return ('Early bird',25) if today<=date.fromisoformat(os.getenv('EARLY_BIRD_CUTOFF','2026-11-14')) else ('Presale',30)
 def keys(*items):return InlineKeyboardMarkup([[InlineKeyboardButton(label,callback_data=value)] for label,value in items])
-async def say(u,text,markup=None):await u.effective_chat.send_message(text,reply_markup=markup)
+def quantity_keys():
+    return InlineKeyboardMarkup([[InlineKeyboardButton(str(n),callback_data=f'qty:{n}') for n in row]
+                                 for row in (range(1,6),range(6,11))])
+def source_keys():return keys(('Instagram','source:Instagram'),('Friend','source:Friend'),('Promoter','source:Promoter'),('Other','source:Other'))
+async def say(u,text,markup=None,parse_mode=None):await u.effective_chat.send_message(text,reply_markup=markup,parse_mode=parse_mode)
 async def private(u):return bool(u.effective_chat and u.effective_chat.type=='private')
 async def staff(u):
     if not await private(u):return False
@@ -73,19 +95,32 @@ async def start(u,c):
     if not await private(u):return
     if c.args and c.args[0].startswith('check_'):
         return await check_token(u,c.args[0][6:])
-    await say(u,'Welcome to DND Nights!\n28 November 2026 · Singapore\n\nBook tickets below. PayNow payments are checked by staff before entry tickets are issued.',keys(('Book tickets','buy'),('My orders','orders'),('Help','help')))
+    await say(u,'Welcome to DND Nights!\nSaturday, 28 November 2026 · Singapore\n\nChoose an option below:',keys(('Book tickets','buy'),('My orders','orders'),('Date & location','event'),('Prices','prices'),('Terms & conditions','terms'),('Help','help')))
+async def event_cmd(u,c):
+    if await private(u):await say(u,'DND Nights\nSaturday, 28 November 2026 · 6:30–10:30pm\nSkyfall Rooftop Restrobar\n50 Telok Blangah Road, Singapore\n\nUse /buy to book.',keys(('Book tickets','buy'),('Main menu','menu')))
+async def prices_cmd(u,c):
+    if not await private(u):return
+    current=offer()
+    await say(u,'Prices per guest:\nEarly bird: S$25 through 14 November\nPresale: S$30 on 15–27 November\nWalk-in: S$35 on 28 November, subject to availability.\n\n'
+              +(f'Current offer: {current[0]} · S${current[1]} per guest.' if current else 'Sales have ended.'),keys(('Book tickets','buy'),('Main menu','menu')))
+async def terms_cmd(u,c):
+    if not await private(u):return
+    await say(u,'DND Nights · Terms & conditions\n\n'
+              'Each paid ticket admits one guest for one entry. A ticket QR works only once. Keep it private; copied or forwarded QRs cannot provide another entry.\n\n'
+              'Guest cancellations and change of plans are non-refundable. If the organiser cancels the event, ticket payments will be refunded. '
+              'If the organiser reschedules, you may keep your ticket for the new date or request a refund. Contact /help with your order serial for those cases.\n\n'
+              'Bookings depend on remaining capacity. Tickets are issued after a staff member confirms the incoming PayNow credit in UOB. '
+              'We store the name, contact and Telegram ID supplied for booking, payment support and admission.',
+              keys(('Book tickets','buy'),('Main menu','menu')))
 async def buy(u,c):
     if not await private(u):return
     if not opened():return await say(u,'Bookings are temporarily closed. Use /help for assistance.')
     current=offer()
     if not current:return await say(u,'Ticket sales have ended.')
     tier,price=current
-    await say(u,f'DND Nights · 28 November 2026\n{tier}: S${price} per guest. Maximum 2 tickets per booking.\n\n'
-        'PayNow only. Staff verify the payment in the receiving bank account before issuing tickets. '
-        'Bank emails can be delayed. Do not pay twice while waiting.\n\n'
-        'Your name, contact and Telegram ID are stored to fulfil your booking and provide support. '
-        'Each ticket admits one guest once. Keep the QR private.\n\n'
-        +os.getenv('EVENT_TERMS','For event details and refund enquiries, use /help before paying.'),keys(('Continue','begin'),('Cancel draft','cancel')))
+    await say(u,f'DND Nights · {tier}: S${price} per ticket.\nChoose up to 10 tickets in one booking.\n\n'
+        'Payment is by PayNow. After paying, tap I have paid and wait for a staff member to check the transaction. Your tickets arrive here after approval.\n\n'
+        'Please read /terms before booking.',keys(('Continue booking','begin'),('Terms & conditions','terms'),('Main menu','menu')))
 async def cancel(u,c):
     if await private(u):ledger.clear(u.effective_user.id);await say(u,'Draft cancelled. Existing orders remain in /orders. Contact /help to resolve an existing payment.')
 async def help_cmd(u,c):
@@ -108,23 +143,29 @@ async def orders(u,c):
 async def payment(u,r):
     if r['user_id']!=u.effective_user.id:return await say(u,'Order unavailable.')
     if r['status']!='pending':return await say(u,'Payment window is closed or this order was submitted. Do not pay again. Use /orders or /help.')
-    caption=(f"DND Nights — PayNow\nOrder: {r['serial']}\nTotal: S${r['total_cents']/100:.2f}\nQuantity: {r['quantity']}\n"
-        f"Pay before: {r['expires_at'][11:16]} Singapore time\n\n"
-        f"Check recipient: {os.environ['PAYNOW_RECIPIENT_NAME']}\n"
-        'Enter the exact total shown above. This QR does not set the amount automatically. '
-        "The bank sender's full name should match the name you gave this bot. If someone else pays, ask them to put your order serial in the PayNow remarks and send /payer ORDER FULL_BANK_SENDER_NAME here. If their bank has no remarks field or they already paid, still send /payer with their name.\n\n"
-        'After transferring, tap I have paid. Staff verify your incoming bank transaction before issuing entry tickets. '
-        'The button itself does not confirm payment. If the payment window has passed, contact /help before transferring.')
-    with payment_image() as f:
-        await u.effective_chat.send_document(document=f,filename='DND_PayNow.png',caption=caption,reply_markup=keys(('I have paid','paid:'+r['serial'])))
+    caption=(f"<b>PayNow · S${r['total_cents']/100:.2f}</b>\n"
+        f"{r['quantity']} ticket(s) · Order {r['serial']}\n"
+        f"Pay by {r['expires_at'][11:16]} Singapore time. The QR sets this amount for you. Check the recipient in your banking app.\n\n"
+        '<b>Your booking name must match the full name on the paying bank account.</b> '
+        f"If someone else pays, ask them to write {r['serial']} in the PayNow remarks and send "
+        f"/payer {r['serial']} FULL_BANK_SENDER_NAME here. No remarks option? Send /payer with their bank name anyway.\n\n"
+        'After paying, tap I have paid and please wait patiently for our team to approve the transaction. '
+        'We do not use AI to approve payments; a staff member checks each incoming bank credit before your tickets are sent. '
+        'Please do not pay twice while waiting.')
+    with payment_image(r['total_cents']) as f:
+        await u.effective_chat.send_photo(photo=f,caption=caption,parse_mode='HTML',reply_markup=keys(('I have paid','paid:'+r['serial'])))
 async def click(u,c):
     q=u.callback_query;await q.answer()
     if not await private(u):return
     key=q.data;user=u.effective_user.id
     try:
         if key=='buy':return await buy(u,c)
+        if key=='menu':return await start(u,c)
         if key=='orders':return await orders(u,c)
         if key=='help':return await help_cmd(u,c)
+        if key=='event':return await event_cmd(u,c)
+        if key=='prices':return await prices_cmd(u,c)
+        if key=='terms':return await terms_cmd(u,c)
         if key=='cancel':return await cancel(u,c)
         if key.startswith('admit:'):
             if await staff(u):await say(u,'ADMITTED — first entry recorded.' if ledger.admit(key[6:],user) else 'BLOCKED — ticket is already used, void or invalid.')
@@ -134,7 +175,7 @@ async def click(u,c):
             return await payment(u,r) if r else await say(u,'Order unavailable.')
         if key.startswith('paid:'):
             serial=key[5:];status=ledger.submit(serial,user)
-            await say(u,'Payment submitted for staff review. Your entry ticket will arrive here after verification. Do not pay again.\n\n'
+            await say(u,'Thanks. Please wait patiently while a staff member checks your payment in UOB. Your entry tickets will arrive here once approved. Please do not pay again.\n\n'
                 f'If someone else paid, send /payer {serial} FULL_BANK_SENDER_NAME so staff can match the UOB entry.'+ ('\nThe payment window expired; staff must also check available capacity.' if status=='review_late' else ''))
             await notify(c.bot,f'Payment claimed: {serial}\nUse /review. A guest claim is not bank confirmation.');return
         state,d=ledger.draft(user)
@@ -144,12 +185,18 @@ async def click(u,c):
             return await say(u,'Question 1 of 4: What is your full name?')
         if key.startswith('source:') and state=='source':
             source=key[7:]
-            if source not in ('Instagram','Friend','Other'):return
-            d['source']=source;ledger.save(user,'quantity',d)
-            return await say(u,'Question 4 of 4: How many tickets?',keys(('1','qty:1'),('2','qty:2')))
-        if key in ('qty:1','qty:2') and state=='quantity':
-            d['quantity']=int(key[-1]);ledger.save(user,'confirm',d)
-            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nOffer: {d['tier']}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
+            if source not in ('Instagram','Friend','Promoter','Other'):return
+            d['source']=source
+            if source=='Promoter':
+                ledger.save(user,'promoter_code',d)
+                return await say(u,'What is your promoter’s referral code? Ask your promoter if you do not have it.')
+            d.pop('promoter_code',None)
+            ledger.save(user,'quantity',d)
+            return await say(u,'Question 4 of 4: How many tickets? Choose 1–10.',quantity_keys())
+        if key.startswith('qty:') and state=='quantity' and key[4:].isdigit() and 1<=int(key[4:])<=10:
+            d['quantity']=int(key[4:]);ledger.save(user,'confirm',d)
+            referral=f"\nPromoter: {d['promoter_code']}" if d.get('promoter_code') else ''
+            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
         if key=='confirm' and state=='confirm':
             if not opened() or not offer():return await say(u,'Sales are closed.')
             r=ledger.create(user,offer());await q.edit_message_reply_markup(reply_markup=None)
@@ -167,7 +214,15 @@ async def answer(u,c):
     if state=='contact':
         if not 3<=len(text)<=80:return await say(u,'Enter a contact between 3 and 80 characters.')
         d['contact']=text;ledger.save(user,'source',d)
-        return await say(u,'Question 3 of 4: Where did you hear about us?',keys(('Instagram','source:Instagram'),('Friend','source:Friend'),('Other','source:Other')))
+        return await say(u,'Question 3 of 4: Where did you hear about us?',source_keys())
+    if state=='source':return await say(u,'Please choose one of these options:',source_keys())
+    if state=='promoter_code':
+        code=text.upper()
+        if not ledger.promoter(code):return await say(u,'That promoter code is not recognised. Please check it with your promoter and try again.')
+        d['promoter_code']=code;ledger.save(user,'quantity',d)
+        return await say(u,'How many tickets? Choose 1–10.',quantity_keys())
+    if state=='quantity':return await say(u,'Please choose how many tickets (1–10) using a button:',quantity_keys())
+    if state=='confirm':return await say(u,'Please use a button to confirm, restart, or cancel:',keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
     await say(u,'Use /buy to book, /orders for your bookings, or /help followed by a question.')
 async def review(u,c):
     if not await staff(u):return
@@ -193,8 +248,20 @@ async def deliver(bot,r,only_missing=False):
     if r['status']!='paid':return
     for t in ledger.tickets(r['serial']):
         if only_missing and t['delivered_at']:continue
-        await bot.send_document(r['user_id'],document=render_ticket(t),filename=f"DND_ticket_{t['label']:03d}.png",caption=f"Payment verified by event staff.\nTicket #{t['label']:03d}\nOrder: {r['serial']}\nOne guest per QR. /tickets resends this same ticket; it does not create another entry.")
+        await bot.send_photo(r['user_id'],photo=render_ticket(t),caption=f"Payment verified by event staff.\nTicket #{t['label']:03d}\nOrder: {r['serial']}\nOne guest per QR. /tickets resends this same ticket; it does not create another entry.")
         ledger.delivered(t['token'])
+async def add_promoter_cmd(u,c):
+    if not await staff(u):return
+    if len(c.args)<2:return await say(u,'Use /addpromoter DND-CODE Promoter full name. Add the same code to the Promoters sheet.')
+    try:ledger.add_promoter(c.args[0],' '.join(c.args[1:]),u.effective_user.id)
+    except ValueError as exc:return await say(u,str(exc))
+    await say(u,f'Promoter code {c.args[0].upper()} is active. Enter it in the Promoters sheet as well.')
+async def promoters_cmd(u,c):
+    if not await staff(u):return
+    stats=ledger.promoter_stats()
+    await say(u,'Promoter counts (ticket quantities):\n'+'\n'.join(
+        f"{p['name']} · {p['code']}: {p['booked']} booked, {p['paid']} paid, {p['checked_in']} checked in"
+        for p in stats))
 async def approve(u,c):
     if not await staff(u):return
     if len(c.args)<4:return await say(u,'After checking your incoming UOB transaction: /approve ORDER YYYY-MM-DD AMOUNT FULL_BANK_SENDER_NAME\nThis records your bank verification and issues live tickets.')
@@ -328,7 +395,7 @@ async def setup(app):
     hook=await app.bot.get_webhook_info()
     if hook.url:raise RuntimeError('Existing webhook found. Stop the old backend and remove the webhook deliberately before running this polling bot.')
     BOT_USERNAME=app.bot.username
-    await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact organisers'),BotCommand('cancel','Cancel booking draft')])
+    await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('event','Date and location'),BotCommand('prices','Ticket prices'),BotCommand('terms','Terms and conditions'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact organisers'),BotCommand('cancel','Cancel booking draft')])
     app.bot_data['maintenance']=asyncio.create_task(maintenance(app))
     bridge=DoorBridge(ledger,ADMINS,os.environ['TELEGRAM_BOT_TOKEN'])
     app.bot_data['door_bridge']=bridge
@@ -354,12 +421,12 @@ async def error(u,c):
 if __name__=='__main__':
     token=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
     if not token or not ADMINS:raise SystemExit('Set TELEGRAM_BOT_TOKEN and ADMIN_USER_IDS in the hosting environment.')
-    if opened() and (not os.getenv('PAYNOW_RECIPIENT_NAME','').strip() or not os.getenv('EVENT_TERMS','').strip()):raise SystemExit('Set verified PAYNOW_RECIPIENT_NAME and EVENT_TERMS before opening sales.')
-    try:payment_image()
-    except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render, or local paynow.png.')
+    if opened() and not os.getenv('PAYNOW_RECIPIENT_NAME','').strip():raise SystemExit('Set verified PAYNOW_RECIPIENT_NAME before opening sales.')
+    try:payment_image(2500)
+    except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render.')
     ledger=Ledger(DATA/'dnd-live.sqlite3',int(os.getenv('EVENT_CAPACITY','230')),os.getenv('EVENT_ID','DND26'))
     app=Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(shutdown).build()
-    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('payer',payer_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
+    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('event',event_cmd),('prices',prices_cmd),('terms',terms_cmd),('tickets',tickets),('cancel',cancel),('help',help_cmd),('payer',payer_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('addpromoter',add_promoter_cmd),('promoters',promoters_cmd),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)

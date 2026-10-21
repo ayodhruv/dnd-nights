@@ -64,4 +64,19 @@ with tempfile.TemporaryDirectory() as d:
  try:l3.approve(a['serial'],'OTHER-BANK',5000,99)
  except ValueError:pass
  else:raise AssertionError('double approval')
+ # A promoter booking uses ten seats, is attributed only when paid, and can be scanned once per ticket.
+ l4=Ledger(d+'/promoter.db',capacity=10)
+ assert l4.promoter('dnd-adeep')['name']=='Adeep'
+ l4.save(1,'confirm',{**D,'source':'Promoter','promoter_code':'DND-ADEEP','quantity':10})
+ c=l4.create(1,('Early bird',25));assert len(l4.tickets(c['serial']))==10 and c['total_cents']==25000
+ assert l4.promoter_stats()[0]['paid']==0
+ l4.submit(c['serial'],1);l4.approve(c['serial'],'BANK-TEN',25000,99)
+ t=l4.tickets(c['serial'])[0];assert l4.admit(t['token'],99) and not l4.admit(t['token'],99)
+ adeep=next(p for p in l4.promoter_stats() if p['code']=='DND-ADEEP')
+ assert (adeep['booked'],adeep['paid'],adeep['checked_in'])==(10,10,1)
+ l5=Ledger(d+'/invalid-promoter.db',capacity=10)
+ l5.save(2,'confirm',{**D,'source':'Promoter','promoter_code':'UNKNOWN','quantity':2})
+ try:l5.create(2,('Early bird',25))
+ except ValueError:pass
+ else:raise AssertionError('unknown promoter accepted')
  print('PASS: owner checks, amount/ref guards, case-normalised duplicate reference rollback, paid-only admission, concurrent once-only entry, void, backup restore, concurrent capacity, expiry/late capacity, repeated approval blocked.')
