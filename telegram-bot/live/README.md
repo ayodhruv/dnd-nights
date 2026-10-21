@@ -66,3 +66,17 @@ No card or Apple Pay, automatic refund, chargeback workflow, name transfer, offl
 ## Local use
 
 Create a new `.venv` in this folder and install requirements. Copy `.env.example` to `.env`, set credentials locally, and leave SALES_OPEN=false until ready. Run `python app.py`. Never point a local instance at a second live database while server sales are open. Keep `.env`, `data/` and all database backups out of GitHub.
+
+## Fast door scanner
+
+Staff send `/scanner` in their private bot chat. Open the returned private link in Safari/Chrome, enable the camera once, then scan guest entry QRs continuously. A paid unused ticket is admitted immediately. Green means the admission transaction committed in the live Render SQLite database. Red blocks used/invalid tickets. Amber means do not admit until a live result is confirmed. Telegram `/check` remains the fallback and uses the same ticket state.
+
+The page also provides a fresh guest table: ticket number, booker name, order serial, payment status, entry status, used time and staff Telegram ID. Two-ticket bookings currently share the booker's name; individual guest names were not collected. No ticket secrets, bank references or contacts are returned by this view.
+
+`SCANNER_URL` optionally overrides the event Site origin (HTTPS only); the default is the existing DND Nights Site. Render polls its secure door queue. `DOOR_BRIDGE_KEY` is a secret on the Site equal to SHA-256 of `dnd-door-bridge-v1:` followed by this bot's token. The token itself is never sent to the Site. Keep the Site and bot bridge configuration in sync after a token rotation. Do not add the key to this repository.
+
+SQLite remains the ticket authority. The Site temporarily holds authenticated requests/results, not a second ticket ledger. Scanner sessions expire in 8 hours. `/scanner revoke` invalidates all scanner sessions for that admin. Only `ADMIN_USER_IDS` may obtain access and process admissions. Use individual authorised staff IDs for attribution. Links grant staff access: keep them private, sign out shared devices, and revoke them if lost.
+
+The bot stores each scanner result transactionally with entry so a response lost during a connection interruption can be recovered with the same request ID. Concurrent scans can admit a ticket only once. Expired queued scans cannot cause delayed admissions. No offline admissions, automatic refunds, payment approvals, or drink redemptions are added by the scanner.
+
+Tests: `python tests/test_storage.py` and `python tests/test_door.py` (temporary fictional ledgers only).

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from storage import Ledger, now
+from door import DoorBridge
 
 ROOT=Path(__file__).resolve().parent
 load_dotenv(ROOT/'.env')
@@ -257,6 +258,18 @@ async def backup_cmd(u,c):
         p=Path(tmp)/'backup.sqlite3';ledger.backup(p);buf.write(p.read_bytes())
     buf.seek(0)
     await u.effective_chat.send_document(document=buf,filename=f'dnd-live-backup-{now():%Y%m%d-%H%M%S}.sqlite3',caption='Private live backup: guest details and active ticket secrets. Store privately; never put on GitHub.')
+async def scanner_cmd(u,c):
+    if not await staff(u):return
+    bridge=c.application.bot_data.get('door_bridge')
+    if not bridge:return await say(u,'Scanner connection is unavailable. Use /check as backup.')
+    try:
+        if c.args and c.args[0]=='revoke':
+            await bridge.revoke(u.effective_user.id)
+            return await say(u,'All scanner sessions for your account have been signed out.')
+        link=await bridge.login(u.effective_user.id)
+        await u.effective_chat.send_message('Private door scanner link (8 hours). Open in Safari or Chrome, then enable the camera. Valid ticket scans immediately record entry. Keep this link private. /scanner revoke signs out your devices.',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Open door scanner',url=link)]]),protect_content=True)
+    except Exception:await say(u,'Scanner connection is unavailable. Try again shortly; /check remains available.')
+
 async def maintenance(app):
     last_backup=None
     while True:
@@ -278,8 +291,17 @@ async def setup(app):
     BOT_USERNAME=app.bot.username
     await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact organisers'),BotCommand('cancel','Cancel booking draft')])
     app.bot_data['maintenance']=asyncio.create_task(maintenance(app))
+    bridge=DoorBridge(ledger,ADMINS,os.environ['TELEGRAM_BOT_TOKEN'])
+    app.bot_data['door_bridge']=bridge
+    app.bot_data['door_task']=asyncio.create_task(bridge.run())
     print(f'Connected @{BOT_USERNAME}; live ledger; sales {"OPEN" if opened() else "CLOSED"}; capacity {ledger.capacity}.',flush=True)
 async def shutdown(app):
+    door_task=app.bot_data.get('door_task')
+    if door_task:
+        door_task.cancel()
+        try:await door_task
+        except asyncio.CancelledError:pass
+    if app.bot_data.get('door_bridge'):await app.bot_data['door_bridge'].close()
     task=app.bot_data.get('maintenance')
     if task:
         task.cancel()
@@ -298,7 +320,7 @@ if __name__=='__main__':
     except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render, or local paynow.png.')
     ledger=Ledger(DATA/'dnd-live.sqlite3',int(os.getenv('EVENT_CAPACITY','230')),os.getenv('EVENT_ID','DND26'))
     app=Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(shutdown).build()
-    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd)]:app.add_handler(CommandHandler(cmd,fn))
+    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd)]:app.add_handler(CommandHandler(cmd,fn))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)

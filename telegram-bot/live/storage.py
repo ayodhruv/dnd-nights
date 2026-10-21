@@ -15,6 +15,7 @@ class Ledger:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.db() as db:
             db.executescript('''
+              CREATE TABLE IF NOT EXISTS door_requests(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,result TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS contacts(user_id INTEGER PRIMARY KEY);
               CREATE TABLE IF NOT EXISTS drafts(user_id INTEGER PRIMARY KEY,state TEXT NOT NULL,data TEXT NOT NULL);
@@ -146,3 +147,40 @@ class Ledger:
         with self.db() as db:db.execute('INSERT OR IGNORE INTO contacts VALUES(?)',(user,))
     def known(self,user):
         with self.db() as db:return bool(db.execute('SELECT 1 FROM contacts WHERE user_id=?',(user,)).fetchone())
+
+    def door_admit(self, request_id, token, admin, created):
+        """Persist the result with admission; retrying a lost response is safe."""
+        import time
+        import hashlib
+        fingerprint=hashlib.sha256(f'{admin}:{token}'.encode()).hexdigest()
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old=db.execute('SELECT fingerprint,result FROM door_requests WHERE id=?',(request_id,)).fetchone()
+            if old:
+                return json.loads(old['result']) if old['fingerprint']==fingerprint else {'status':'conflict'}
+            result={'status':'expired'}
+            if 0<=time.time()-float(created)<=12:
+                r=db.execute('SELECT tickets.*,orders.details,orders.status FROM tickets JOIN orders USING(serial) WHERE token=?',(token,)).fetchone()
+                if not r or r['status']!='paid':result={'status':'invalid'}
+                else:
+                    result={'status':'used' if r['used_at'] else 'admitted','label':r['label'],
+                            'booker_name':json.loads(r['details']).get('name',''),
+                            'serial':r['serial'],'used_at':r['used_at']}
+                    if not r['used_at']:
+                        stamp=now().isoformat()
+                        db.execute('UPDATE tickets SET used_at=?,used_by=? WHERE token=?',(stamp,admin,token))
+                        self.audit(db,r['serial'],'admitted',admin,'Door scanner request '+request_id)
+                        result['used_at']=stamp
+            db.execute('INSERT INTO door_requests(id,fingerprint,result) VALUES(?,?,?)',(request_id,fingerprint,json.dumps(result)))
+            return result
+
+    def door_guests(self):
+        """A fresh staff view; never return ticket secrets or bank details."""
+        with self.db() as db:
+            self.expire(db)
+            rows=db.execute('SELECT tickets.label,tickets.used_at,tickets.used_by,orders.serial,orders.details,orders.status FROM tickets JOIN orders USING(serial) ORDER BY orders.created_at DESC,tickets.label LIMIT 1500').fetchall()
+            return {'status':'ok','updated_at':now().isoformat(),'guests':[
+                {'label':r['label'],'booker_name':json.loads(r['details']).get('name',''),
+                 'serial':r['serial'],'payment_status':r['status'],
+                 'entry_status':'Used' if r['used_at'] else ('Ready' if r['status']=='paid' else 'Not valid'),
+                 'used_at':r['used_at'],'used_by':r['used_by']} for r in rows]}
