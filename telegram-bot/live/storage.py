@@ -16,6 +16,7 @@ class Ledger:
         with self.db() as db:
             db.executescript('''
               CREATE TABLE IF NOT EXISTS door_requests(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,result TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS door_staff(user_id INTEGER PRIMARY KEY,granted_by INTEGER NOT NULL,created_at TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS contacts(user_id INTEGER PRIMARY KEY);
               CREATE TABLE IF NOT EXISTS drafts(user_id INTEGER PRIMARY KEY,state TEXT NOT NULL,data TEXT NOT NULL);
@@ -147,6 +148,21 @@ class Ledger:
         with self.db() as db:db.execute('INSERT OR IGNORE INTO contacts VALUES(?)',(user,))
     def known(self,user):
         with self.db() as db:return bool(db.execute('SELECT 1 FROM contacts WHERE user_id=?',(user,)).fetchone())
+
+    def door_authorized(self,user,admins):
+        if user in admins:return True
+        with self.db() as db:return bool(db.execute('SELECT 1 FROM door_staff WHERE user_id=?',(user,)).fetchone())
+    def grant_door(self,user,admin):
+        with self.db() as db:
+            db.execute('INSERT OR IGNORE INTO door_staff(user_id,granted_by,created_at) VALUES(?,?,?)',(user,admin,now().isoformat()))
+            self.audit(db,None,'door_staff_granted',admin,str(user))
+    def revoke_door(self,user,admin):
+        with self.db() as db:
+            cur=db.execute('DELETE FROM door_staff WHERE user_id=?',(user,))
+            if cur.rowcount:self.audit(db,None,'door_staff_revoked',admin,str(user))
+            return bool(cur.rowcount)
+    def door_staff_list(self):
+        with self.db() as db:return [dict(r) for r in db.execute('SELECT user_id,granted_by,created_at FROM door_staff ORDER BY created_at')]
 
     def door_admit(self, request_id, token, admin, created):
         """Persist the result with admission; retrying a lost response is safe."""

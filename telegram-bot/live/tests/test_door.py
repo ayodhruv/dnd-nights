@@ -11,6 +11,11 @@ from storage import Ledger,now
 def main():
  with tempfile.TemporaryDirectory() as tmp:
   ledger=Ledger(Path(tmp)/'db.sqlite3')
+  assert ledger.door_authorized(7,{7}) and not ledger.door_authorized(8,{7})
+  ledger.grant_door(8,7)
+  assert ledger.door_authorized(8,{7}) and [r['user_id'] for r in ledger.door_staff_list()]==[8]
+  assert ledger.revoke_door(8,7) and not ledger.door_authorized(8,{7})
+  assert not ledger.door_staff_list() and ledger.door_authorized(7,{7})
   with ledger.db() as db:
    for i,status in enumerate(['paid','pending','void'],1):
     serial=f'ORDER{i}'
@@ -34,5 +39,5 @@ def main():
   assert all('token' not in row and 'contact' not in row for row in guests['guests'])
   assert next(g for g in guests['guests'] if g['label']==101)['entry_status']=='Used'
   with ledger.db() as db:assert db.execute("SELECT COUNT(*) FROM audit WHERE action='admitted'").fetchone()[0]==1
- print('Door tests passed: concurrent entry, replay recovery, invalid/unpaid/void/stale rejection, shared Telegram state, no ticket secrets in guest list.')
+ print('Door tests passed: scanner-only grant/revoke, concurrent entry, replay recovery, invalid/unpaid/void/stale rejection, shared Telegram state, no ticket secrets in guest list.')
 if __name__=='__main__':main()

@@ -259,16 +259,45 @@ async def backup_cmd(u,c):
     buf.seek(0)
     await u.effective_chat.send_document(document=buf,filename=f'dnd-live-backup-{now():%Y%m%d-%H%M%S}.sqlite3',caption='Private live backup: guest details and active ticket secrets. Store privately; never put on GitHub.')
 async def scanner_cmd(u,c):
-    if not await staff(u):return
+    if not await private(u):return
+    if not ledger.door_authorized(u.effective_user.id,ADMINS):
+        return await say(u,'Scanner access has not been granted. Send /whoami to the organiser so they can add your Telegram ID.')
     bridge=c.application.bot_data.get('door_bridge')
-    if not bridge:return await say(u,'Scanner connection is unavailable. Use /check as backup.')
+    if not bridge:return await say(u,'Scanner connection is unavailable. Contact an organiser for admission help.')
     try:
         if c.args and c.args[0]=='revoke':
             await bridge.revoke(u.effective_user.id)
             return await say(u,'All scanner sessions for your account have been signed out.')
         link=await bridge.login(u.effective_user.id)
         await u.effective_chat.send_message('Private door scanner link (8 hours). Open in Safari or Chrome, then enable the camera. Valid ticket scans immediately record entry. Keep this link private. /scanner revoke signs out your devices.',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Open door scanner',url=link)]]),protect_content=True)
-    except Exception:await say(u,'Scanner connection is unavailable. Try again shortly; /check remains available.')
+    except Exception:await say(u,'Scanner connection is unavailable. Try again shortly or contact an organiser.')
+
+async def grant_door_cmd(u,c):
+    if not await staff(u):return
+    if len(c.args)!=1 or not c.args[0].isdigit() or int(c.args[0])<=0:
+        return await say(u,'Use /grantdoor TELEGRAM_ID. Ask the staff member to send /whoami to this bot first.')
+    target=int(c.args[0])
+    ledger.grant_door(target,u.effective_user.id)
+    await say(u,f'Scanner access granted to Telegram ID {target}. They can now send /scanner in their own private chat with this bot. Payment approvals and backups remain admin-only.')
+
+async def revoke_door_cmd(u,c):
+    if not await staff(u):return
+    if len(c.args)!=1 or not c.args[0].isdigit() or int(c.args[0])<=0:
+        return await say(u,'Use /revokedoor TELEGRAM_ID.')
+    target=int(c.args[0])
+    if target in ADMINS:return await say(u,'That ID is an admin. Remove it from ADMIN_USER_IDS in Render to revoke admin access.')
+    removed=ledger.revoke_door(target,u.effective_user.id)
+    bridge=c.application.bot_data.get('door_bridge')
+    try:
+        if bridge:await bridge.revoke(target)
+    except Exception:
+        return await say(u,f'Door permission removed for {target}, but the browser session could not be signed out now. The bot will reject further admissions from it; retry /revokedoor when the scanner connection returns.')
+    await say(u,f'Door access revoked for {target}; existing scanner links have been signed out.' if removed else f'{target} was not on the door staff list. Any existing scanner links were signed out.')
+
+async def door_staff_cmd(u,c):
+    if not await staff(u):return
+    rows=ledger.door_staff_list()
+    await say(u,'Door scanner staff (Telegram IDs):\n'+('\n'.join(str(r['user_id']) for r in rows) if rows else 'None yet. Use /grantdoor TELEGRAM_ID.'))
 
 async def maintenance(app):
     last_backup=None
@@ -320,7 +349,7 @@ if __name__=='__main__':
     except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render, or local paynow.png.')
     ledger=Ledger(DATA/'dnd-live.sqlite3',int(os.getenv('EVENT_CAPACITY','230')),os.getenv('EVENT_ID','DND26'))
     app=Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(shutdown).build()
-    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd)]:app.add_handler(CommandHandler(cmd,fn))
+    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)

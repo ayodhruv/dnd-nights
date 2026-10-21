@@ -35,7 +35,7 @@ class DoorBridge:
                     print('Door scanner connected to live Render ledger.',flush=True);announced=True
                 for job in data.get('jobs',[]):
                     admin=job.get('admin')
-                    if admin not in self.admins:
+                    if not self.ledger.door_authorized(admin,self.admins):
                         result={'status':'forbidden'}
                     elif job.get('action')=='scan':
                         result=self.ledger.door_admit(job['id'],job.get('token',''),admin,job['created'])
