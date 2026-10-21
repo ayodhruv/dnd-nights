@@ -6,9 +6,9 @@ Confirmed configuration: event 28 November 2026, early bird S$25 through 14 Nove
 
 ## What is ready
 
-- Guest Q&A and per-order PayNow QR delivery. The static QR does not embed the total or serial. Remarks remain optional.
+- Guest Q&A and per-order PayNow QR delivery. The static QR does not embed the total or serial. The guest's name should match the bank sender. If someone else pays, ask for the order serial in remarks where supported and record the actual sender with `/payer ORDER FULL_BANK_SENDER_NAME`; a missing remark does not prevent manual review.
 - One active unpaid booking per Telegram user, 30-minute unpaid holds, atomic capacity enforcement. Submitted payments hold capacity for review. Expired payments can be reported and are explicitly reviewed against remaining capacity.
-- Staff approve only after checking the actual incoming bank transaction and identifying its payer/order. Exact amounts and unique bank references enforced in one SQLite transaction. Identical amounts or screenshots alone are not sufficient.
+- Staff approve only after checking the actual incoming UOB credit against the declared bank sender, amount and bank date. The receiving list showed no transaction ID, so the bot stores a clearly labelled internal match key instead of pretending one exists. The same sender, amount and bank date cannot approve two orders automatically; staff must separately resolve a genuine second identical credit. Screenshots and claims alone are insufficient.
 - One secret QR per guest; ticket labels are unique. Public order IDs include `DND26-` followed by DDMM + daily sequence + first label. Labels are not the QR secret.
 - QR contains a Telegram link: staff camera scan -> open bot -> Start -> validation -> explicit Admit. Ordinary guests cannot validate/admit. Repeated or concurrent admission blocked.
 - `/tickets` resends existing tickets. Undelivered tickets retry every minute after approval. A crash between a successful Telegram send and recording delivery can resend the same ticket, never create an additional entitlement.
@@ -46,8 +46,9 @@ Automatic deploys are off: later GitHub pushes need a deliberate Render deploy. 
 
 ## Staff commands
 
-- `/review`: up to 50 awaiting payments, names, contacts, expected amount.
-- `/approve ORDER BANK_TRANSACTION_REFERENCE AMOUNT`: attests staff verified UOB; issues real tickets. Replace the placeholder. Bank references are trimmed and uppercased; importers need bank-specific canonicalisation before integration.
+- `/review`: up to 50 claimed payments with booker, declared bank sender, contact and expected amount.
+- `/approve ORDER YYYY-MM-DD AMOUNT FULL_BANK_SENDER_NAME`: attests staff matched a real incoming UOB credit. Date and sender must be copied from the bank view; the amount must match the order. The bot compares the name against the guest's declared payer, records an internal reconciliation key, and issues real tickets. The key is **not** a bank-issued transaction reference. Exact same date/name/amount cannot be used for two orders without separate reconciliation.
+- Guests use `/payer ORDER FULL_BANK_SENDER_NAME` if the sender differs from their booking name. Only that guest may change their pending or review order, and not after approval.
 - `/reject ORDER reason`: resolve unpaid/incorrect claims and release their hold. If money actually arrived, arrange a refund or resolve with the guest; this command does not move money.
 - `/void ORDER reason`: invalidate an unadmitted paid booking. Does not refund money. Bookings with admitted guests cannot be voided to release capacity.
 - `/resend ORDER`: send the same paid QRs again.
@@ -59,7 +60,7 @@ Guests use `/help ORDER question`. Support messages go to staff through the bot;
 
 ## Payment limitations
 
-The UOB email reader in the parent folder is **not connected to live approvals** and is not run by this worker. Gmail credentials are not needed here. The email lacks payer identity, order reference and bank transaction ID; amount/time matching is not reliable buyer verification. Staff verify payment in UOB. If the bank provides no unique reference or payer/order cannot be resolved, do not invent one or approve speculatively. Resolve it with the guest.
+The UOB email reader in the parent folder is **not connected to live approvals** and is not run by this worker. Gmail credentials are not needed here. The email lacks payer identity and order reference; amount/date matching without the receiving bank's sender name is unreliable. Staff verify in UOB. A guest may give a different payer name, and an order remark can help identify it, but neither substitutes for a real incoming credit. If the same sender sends the same amount on the same bank date twice, the automatic duplicate guard intentionally blocks the second booking until staff can establish that a second credit really exists. Never invent a bank ID or approve from a guest screenshot.
 
 No card or Apple Pay, automatic refund, chargeback workflow, name transfer, offline check-in or automated bank reconciliation is provided. Check-in needs internet and Telegram. The SQLite ledger is suitable for one persistent worker; horizontally scaling it needs a shared database. Holds and submitted-payment abuse can temporarily consume capacity: monitor /review and resolve false claims. No public bank data or secrets are included in the repository.
 
@@ -79,4 +80,4 @@ SQLite remains the ticket authority. The Site temporarily holds authenticated re
 
 The bot stores each scanner result transactionally with entry so a response lost during a connection interruption can be recovered with the same request ID. Concurrent scans can admit a ticket only once. Expired queued scans cannot cause delayed admissions. No offline admissions, automatic refunds, payment approvals, or drink redemptions are added by the scanner.
 
-Tests: `python tests/test_storage.py` and `python tests/test_door.py` (temporary fictional ledgers only).
+Tests: `python tests/test_storage.py`, `python tests/test_payment_match.py`, and `python tests/test_door.py` (temporary fictional ledgers only).

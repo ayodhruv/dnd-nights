@@ -1,13 +1,21 @@
 """Single-event live ledger. Every payment/seat/check-in mutation is transactional."""
 import json
+import hashlib
 import secrets
 import sqlite3
-from datetime import datetime, timedelta
+import unicodedata
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo('Asia/Singapore')
 def now(): return datetime.now(TZ)
+def bank_name(value):
+    name=' '.join(unicodedata.normalize('NFKC',value).split())
+    if not 2<=len(name)<=80 or not any(c.isalpha() for c in name):
+        raise ValueError('Enter the full name shown for the paying bank account (2–80 characters).')
+    return name
+def name_key(value):return bank_name(value).casefold()
 
 class Ledger:
     def __init__(self, path, capacity=230, event_id='DND26', hold_minutes=30):
@@ -30,6 +38,9 @@ class Ledger:
               CREATE TABLE IF NOT EXISTS payments(
                 reference TEXT PRIMARY KEY,serial TEXT NOT NULL UNIQUE REFERENCES orders(serial),
                 amount_cents INTEGER NOT NULL,admin_id INTEGER NOT NULL,created_at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS payment_evidence(
+                serial TEXT PRIMARY KEY REFERENCES orders(serial),sender_name TEXT NOT NULL,
+                bank_date TEXT NOT NULL,match_key TEXT NOT NULL UNIQUE);
               CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,serial TEXT,action TEXT NOT NULL,
                 actor INTEGER NOT NULL,created_at TEXT NOT NULL,note TEXT NOT NULL DEFAULT '');
             ''')
@@ -99,7 +110,27 @@ class Ledger:
             return status
     def queue(self):
         with self.db() as db:return db.execute("SELECT * FROM orders WHERE status IN ('review','review_late') ORDER BY created_at LIMIT 50").fetchall()
-    def approve(self,serial,reference,amount,admin):
+    def set_payer(self,serial,user,payer):
+        payer=bank_name(payer)
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE');self.expire(db)
+            r=db.execute('SELECT * FROM orders WHERE serial=? AND user_id=?',(serial,user)).fetchone()
+            if not r or r['status'] not in ('pending','expired','review','review_late'):
+                raise ValueError('This order cannot change its payer. Use /orders or /help.')
+            details=json.loads(r['details']);details['payer_name']=payer
+            db.execute('UPDATE orders SET details=? WHERE serial=?',(json.dumps(details),serial))
+            self.audit(db,serial,'payer_identified',user,payer)
+            return r['status']
+    def approve_matched(self,serial,sender,bank_date,amount,admin):
+        sender=bank_name(sender)
+        try:day=date.fromisoformat(bank_date)
+        except ValueError:raise ValueError('Use the bank date as YYYY-MM-DD, as shown in UOB.') from None
+        if day.isoformat()!=bank_date or day>now().date():
+            raise ValueError('Use a real incoming transaction date shown in UOB, not a future date.')
+        match_key=hashlib.sha256(f'{day.isoformat()}|{amount}|{name_key(sender)}'.encode()).hexdigest()
+        # An internal reconciliation key, expressly not a bank-issued reference.
+        return self.approve(serial,'MANUAL-UOB-'+match_key,amount,admin,(sender,day.isoformat(),match_key))
+    def approve(self,serial,reference,amount,admin,evidence=None):
         ref=reference.strip().upper()
         if not 4<=len(ref)<=120 or ref.startswith('TEST-'):raise ValueError('Use the actual bank transaction reference, not a TEST reference.')
         with self.db() as db:
@@ -107,10 +138,18 @@ class Ledger:
             r=db.execute('SELECT * FROM orders WHERE serial=?',(serial,)).fetchone()
             if not r or r['status'] not in ('review','review_late'):raise ValueError('Order is not awaiting review, or is already approved.')
             if r['total_cents']!=amount:raise ValueError('Amount mismatch. Approval blocked.')
+            if evidence:
+                declared=json.loads(r['details'])
+                expected=declared.get('payer_name') or declared['name']
+                if name_key(expected)!=name_key(evidence[0]):
+                    raise ValueError('Sender name differs from the declared payer. Ask the guest to send /payer ORDER FULL_BANK_NAME, then verify in UOB again.')
             occupied=db.execute("SELECT COALESCE(SUM(quantity),0) FROM orders WHERE status IN ('pending','review','paid') AND serial<>?",(serial,)).fetchone()[0]
             if occupied+r['quantity']>self.capacity:raise ValueError('Capacity reached. Do not issue a ticket; resolve this payment with the guest.')
             try:db.execute('INSERT INTO payments VALUES(?,?,?,?,?)',(ref,serial,amount,admin,now().isoformat()))
-            except sqlite3.IntegrityError:raise ValueError('Bank reference already used. Approval blocked.') from None
+            except sqlite3.IntegrityError:
+                raise ValueError('This payer, amount and bank date were already matched to another order. Check for a distinct second credit in UOB; do not approve this one yet.') from None
+            if evidence:
+                db.execute('INSERT INTO payment_evidence(serial,sender_name,bank_date,match_key) VALUES(?,?,?,?)',(serial,*evidence))
             db.execute("UPDATE orders SET status='paid' WHERE serial=?",(serial,));self.audit(db,serial,'bank_verified',admin,ref)
         return self.order(serial)
     def reject(self,serial,admin,note):

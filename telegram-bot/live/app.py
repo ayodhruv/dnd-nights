@@ -95,7 +95,7 @@ async def help_cmd(u,c):
         msg=' '.join(c.args)[:1000]
         await notify(c.bot,f"Guest support request\nTelegram ID: {u.effective_user.id}\nName: {u.effective_user.full_name}\n{msg}")
         return await say(u,'Your message was sent to the organisers. Keep this chat open for their reply.')
-    await say(u,'Send /help followed by your question and order serial. The organisers will reply here.\n\nIf already paid, do not pay again. Tell us if the payment came from someone else. Never send a bank password or OTP.')
+    await say(u,'Send /help followed by your question and order serial. The organisers will reply here.\n\nIf someone else paid, send /payer ORDER FULL_BANK_SENDER_NAME. Do not pay again while waiting. Never send a bank password or OTP.')
 async def orders(u,c):
     if not await private(u):return
     rows=ledger.orders(u.effective_user.id)
@@ -103,7 +103,8 @@ async def orders(u,c):
     for r in rows[:20]:
         markup=keys(('View payment QR','pay:'+r['serial']),('I have paid','paid:'+r['serial'])) if r['status']=='pending' else None
         if r['status']=='expired':markup=keys(('I already paid — request review','paid:'+r['serial']))
-        await say(u,f"Order {r['serial']}\nQuantity: {r['quantity']}\nTotal: S${r['total_cents']/100:.2f}\nStatus: {r['status']}",markup)
+        d=json.loads(r['details'])
+        await say(u,f"Order {r['serial']}\nQuantity: {r['quantity']}\nTotal: S${r['total_cents']/100:.2f}\nExpected bank sender: {d.get('payer_name') or d['name']}\nStatus: {r['status']}",markup)
 async def payment(u,r):
     if r['user_id']!=u.effective_user.id:return await say(u,'Order unavailable.')
     if r['status']!='pending':return await say(u,'Payment window is closed or this order was submitted. Do not pay again. Use /orders or /help.')
@@ -111,7 +112,7 @@ async def payment(u,r):
         f"Pay before: {r['expires_at'][11:16]} Singapore time\n\n"
         f"Check recipient: {os.environ['PAYNOW_RECIPIENT_NAME']}\n"
         'Enter the exact total shown above. This QR does not set the amount automatically. '
-        'Remarks are optional; your order serial helps if you include it.\n\n'
+        "The bank sender's full name should match the name you gave this bot. If someone else pays, ask them to put your order serial in the PayNow remarks and send /payer ORDER FULL_BANK_SENDER_NAME here. If their bank has no remarks field or they already paid, still send /payer with their name.\n\n"
         'After transferring, tap I have paid. Staff verify your incoming bank transaction before issuing entry tickets. '
         'The button itself does not confirm payment. If the payment window has passed, contact /help before transferring.')
     with payment_image() as f:
@@ -134,7 +135,7 @@ async def click(u,c):
         if key.startswith('paid:'):
             serial=key[5:];status=ledger.submit(serial,user)
             await say(u,'Payment submitted for staff review. Your entry ticket will arrive here after verification. Do not pay again.\n\n'
-                'If someone else paid, send /help with the order serial and the payer name shown by their bank.'+ ('\nThe payment window expired; staff must also check available capacity.' if status=='review_late' else ''))
+                f'If someone else paid, send /payer {serial} FULL_BANK_SENDER_NAME so staff can match the UOB entry.'+ ('\nThe payment window expired; staff must also check available capacity.' if status=='review_late' else ''))
             await notify(c.bot,f'Payment claimed: {serial}\nUse /review. A guest claim is not bank confirmation.');return
         state,d=ledger.draft(user)
         if key=='begin':
@@ -174,10 +175,10 @@ async def review(u,c):
     if not rows:return await say(u,'No payments awaiting review.')
     for r in rows:
         d=json.loads(r['details'])
-        await say(u,f"REQUIRES BANK VERIFICATION\nOrder: {r['serial']}\nName: {d['name']}\nContact: {d['contact']}\nQuantity: {r['quantity']}\nExpected: S${r['total_cents']/100:.2f}\nState: {r['status']}\n\n"
-            'Open UOB and confirm the money arrived and belongs to this guest. Resolve identical amounts/payer differences before approval. Do not approve from a screenshot or email amount alone.\n\n'
-            f"After checking, use:\n/approve {r['serial']} BANK_TRANSACTION_REFERENCE {r['total_cents']/100:.2f}\n\n"
-            'Replace BANK_TRANSACTION_REFERENCE with the actual incoming bank transaction ID. If unavailable, contact the guest and obtain enough bank evidence; do not invent a reference.')
+        await say(u,f"REQUIRES BANK VERIFICATION\nOrder: {r['serial']}\nBooker: {d['name']}\nDeclared bank sender: {d.get('payer_name') or d['name']}\nContact: {d['contact']}\nQuantity: {r['quantity']}\nExpected: S${r['total_cents']/100:.2f}\nState: {r['status']}\n\n"
+            'Open your receiving UOB account. Match an incoming credit by bank sender full name, exact amount and bank date. Check any order remark if another person paid. If the name differs, ask the guest to use /payer ORDER FULL_BANK_SENDER_NAME. An email or guest claim alone does not verify payment.\n\n'
+            f"After checking, use:\n/approve {r['serial']} YYYY-MM-DD {r['total_cents']/100:.2f} FULL_BANK_SENDER_NAME\n\n"
+            'Replace the date and sender with what you actually see in UOB. Identical sender, amount and date used for another order are blocked for manual resolution.')
 def render_ticket(t):
     link=f"https://t.me/{BOT_USERNAME}?start=check_{t['token']}"
     qr=qrcode.make(link).convert('RGB')
@@ -196,18 +197,27 @@ async def deliver(bot,r,only_missing=False):
         ledger.delivered(t['token'])
 async def approve(u,c):
     if not await staff(u):return
-    if len(c.args)!=3:return await say(u,'After verifying in UOB: /approve ORDER BANK_REFERENCE AMOUNT\nThis records your bank verification and issues live tickets.')
-    serial,ref,amount=c.args
-    if ref.upper() in ('BANK_REFERENCE','BANK_TRANSACTION_REFERENCE','REFERENCE'):
-        return await say(u,'Replace the placeholder with the actual incoming bank transaction reference.')
+    if len(c.args)<4:return await say(u,'After checking your incoming UOB transaction: /approve ORDER YYYY-MM-DD AMOUNT FULL_BANK_SENDER_NAME\nThis records your bank verification and issues live tickets.')
+    serial,bank_date,amount,*sender_parts=c.args
+    sender=' '.join(sender_parts)
+    if bank_date=='YYYY-MM-DD' or sender.upper()=='FULL_BANK_SENDER_NAME':
+        return await say(u,'Replace the date and sender placeholders with the details shown by UOB.')
     try:
         money=Decimal(amount)
         if not money.is_finite() or money<=0 or money*100!=(money*100).to_integral_value():raise ValueError('Invalid payment amount.')
-        r=ledger.approve(serial,ref,int(money*100),u.effective_user.id)
+        r=ledger.approve_matched(serial,sender,bank_date,int(money*100),u.effective_user.id)
     except (ValueError,InvalidOperation) as exc:return await say(u,str(exc))
     await say(u,'Bank verification saved. Sending tickets.')
     try:await deliver(c.bot,r)
     except Exception:await say(u,'Approval saved but delivery failed. Automatic retry runs every minute. /resend ORDER retries the same tickets.')
+async def payer_cmd(u,c):
+    if not await private(u):return
+    if len(c.args)<2:return await say(u,'Use /payer ORDER FULL_BANK_SENDER_NAME if the bank account paying differs from your booking name.')
+    serial=c.args[0]
+    try:status=ledger.set_payer(serial,u.effective_user.id,' '.join(c.args[1:]))
+    except ValueError as exc:return await say(u,str(exc))
+    await say(u,'Payer name saved for this order. Staff will still verify the incoming payment in UOB. Do not pay twice.')
+    if status in ('review','review_late'):await notify(c.bot,f'Payer name updated for {serial}. Check /review and verify the bank credit before approval.')
 async def tickets(u,c):
     if not await private(u):return
     rows=[r for r in ledger.orders(u.effective_user.id) if r['status']=='paid']
@@ -349,7 +359,7 @@ if __name__=='__main__':
     except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render, or local paynow.png.')
     ledger=Ledger(DATA/'dnd-live.sqlite3',int(os.getenv('EVENT_CAPACITY','230')),os.getenv('EVENT_ID','DND26'))
     app=Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(shutdown).build()
-    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
+    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('tickets',tickets),('cancel',cancel),('help',help_cmd),('payer',payer_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)
