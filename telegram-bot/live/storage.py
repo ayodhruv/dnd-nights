@@ -28,7 +28,8 @@ class Ledger:
               CREATE TABLE IF NOT EXISTS door_staff(user_id INTEGER PRIMARY KEY,granted_by INTEGER NOT NULL,created_at TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS contacts(user_id INTEGER PRIMARY KEY);
-              CREATE TABLE IF NOT EXISTS promoters(code TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS promoters(code TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL,
+                discount_percent INTEGER NOT NULL DEFAULT 0);
               CREATE TABLE IF NOT EXISTS drafts(user_id INTEGER PRIMARY KEY,state TEXT NOT NULL,data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS orders(
                 serial TEXT PRIMARY KEY,user_id INTEGER NOT NULL,day TEXT NOT NULL,seq INTEGER NOT NULL,
@@ -50,9 +51,18 @@ class Ledger:
             if existing and existing[0] != event_id:
                 raise ValueError('This database belongs to a different event.')
             db.execute("INSERT OR IGNORE INTO meta VALUES('event_id',?)", (event_id,))
-            # Starting roster from the DND Promoters sheet; later codes can be added by staff.
+            # Preserve old orders and promoter attribution while migrating the live SQLite file.
+            if 'discount_percent' not in {r['name'] for r in db.execute('PRAGMA table_info(promoters)')}:
+                db.execute('ALTER TABLE promoters ADD COLUMN discount_percent INTEGER NOT NULL DEFAULT 0')
+            # Older codes remain in the ledger for historical orders, but cannot start new discounted bookings.
             for code,name in (('DND-ADEEP','Adeep'),('DND-NIRBHAY','Nirbhay')):
-                db.execute('INSERT OR IGNORE INTO promoters VALUES(?,?,?)',(code,name,now().isoformat()))
+                db.execute('INSERT OR IGNORE INTO promoters(code,name,created_at) VALUES(?,?,?)',(code,name,now().isoformat()))
+            # Confirmed NAME20 codes from the DND Promoters sheet.
+            for code,name in (('ADEEP20','Adeep'),('NIRBHAY20','Nirbhay'),('ISHWAR20','Ishwar'),
+                              ('SHALU20','Shalu'),('AUSTIN20','Austin'),('AIRA20','Ira')):
+                db.execute('INSERT INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,20) '
+                           'ON CONFLICT(code) DO UPDATE SET name=excluded.name,discount_percent=20',
+                           (code,name,now().isoformat()))
     def db(self):
         db=sqlite3.connect(self.path,timeout=20)
         db.row_factory=sqlite3.Row
@@ -77,12 +87,19 @@ class Ledger:
             r=db.execute('SELECT * FROM drafts WHERE user_id=?',(user,)).fetchone()
             if not r or r['state']!='confirm':raise ValueError('This confirmation is old. Use /orders.')
             d=json.loads(r['data']);qty=d['quantity']
-            if (d['tier'],d['price'])!=expected_offer:raise ValueError('The offer changed. Please start again with /buy.')
+            tier,base_price=expected_offer
+            if d['tier']!=tier:raise ValueError('The offer changed. Please start again with /buy.')
             if type(qty) is not int or not 1<=qty<=10:raise ValueError('Choose 1 to 10 tickets.')
+            expected_price=base_price
             if d.get('source')=='Promoter':
                 code=d.get('promoter_code','').strip().upper()
-                if not db.execute('SELECT 1 FROM promoters WHERE code=?',(code,)).fetchone():
-                    raise ValueError('Unknown promoter code. Ask your promoter for their code.')
+                promoter=db.execute('SELECT discount_percent FROM promoters WHERE code=? AND discount_percent=20',(code,)).fetchone()
+                if not promoter:raise ValueError('This code is not a confirmed promoter code. Ask your promoter for a NAME20 code and start again with /buy.')
+                expected_price=base_price*(100-promoter['discount_percent'])//100
+                d['promoter_code']=code
+            elif d.get('promoter_code'):
+                raise ValueError('Please start again with /buy to choose your referral source.')
+            if d['price']!=expected_price:raise ValueError('The ticket price changed. Please start again with /buy.')
             active=db.execute("SELECT serial FROM orders WHERE user_id=? AND status IN ('pending','review','review_late')",(user,)).fetchone()
             if active:raise ValueError('You already have an unpaid booking. Use /orders or /help.')
             occupied=db.execute("SELECT COALESCE(SUM(quantity),0) FROM orders WHERE status IN ('pending','review','paid')").fetchone()[0]
@@ -94,7 +111,7 @@ class Ledger:
             seq=db.execute('SELECT COALESCE(MAX(seq),0)+1 FROM orders WHERE day=?',(day,)).fetchone()[0]
             if seq>999:raise ValueError('Daily booking limit reached. Contact /help.')
             serial=f'{self.event_id}-{t:%d%m}{seq:03d}{labels[0]:03d}'
-            db.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)',(serial,user,day,seq,json.dumps(d),qty,d['price']*qty*100,'pending',t.isoformat(),(t+timedelta(minutes=self.hold_minutes)).isoformat()))
+            db.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)',(serial,user,day,seq,json.dumps(d),qty,expected_price*qty*100,'pending',t.isoformat(),(t+timedelta(minutes=self.hold_minutes)).isoformat()))
             for label in labels:db.execute('INSERT INTO tickets(token,serial,label) VALUES(?,?,?)',(secrets.token_urlsafe(32),serial,label))
             self.audit(db,serial,'created',user)
             db.execute('DELETE FROM drafts WHERE user_id=?',(user,))
@@ -198,13 +215,13 @@ class Ledger:
         with self.db() as db:return bool(db.execute('SELECT 1 FROM contacts WHERE user_id=?',(user,)).fetchone())
 
     def promoter(self,code):
-        with self.db() as db:return db.execute('SELECT * FROM promoters WHERE code=?',(code.strip().upper(),)).fetchone()
+        with self.db() as db:return db.execute('SELECT * FROM promoters WHERE code=? AND discount_percent=20',(code.strip().upper(),)).fetchone()
     def add_promoter(self,code,name,admin):
         code=code.strip().upper();name=name.strip()
-        if not re.fullmatch(r'DND-[A-Z0-9-]{2,32}',code) or not 2<=len(name)<=80:
-            raise ValueError('Use /addpromoter DND-CODE Promoter name.')
+        if not re.fullmatch(r'[A-Z][A-Z0-9-]{1,30}20',code) or not 2<=len(name)<=80:
+            raise ValueError('Use /addpromoter NAME20 Promoter full name; add the same code to the Promoters sheet.')
         with self.db() as db:
-            try:db.execute('INSERT INTO promoters VALUES(?,?,?)',(code,name,now().isoformat()))
+            try:db.execute('INSERT INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,20)',(code,name,now().isoformat()))
             except sqlite3.IntegrityError:raise ValueError('That promoter code already exists.') from None
             self.audit(db,None,'promoter_added',admin,code)
     def promoter_stats(self):
