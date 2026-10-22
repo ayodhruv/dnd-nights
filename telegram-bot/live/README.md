@@ -7,7 +7,7 @@ Confirmed configuration: event 28 November 2026, early bird S$25 through 14 Nove
 ## What is ready
 
 - Guest Q&A with menu pages for date/location, prices and terms. PayNow QRs are sent as Telegram photos with the exact total prefilled; the guest's name should match the bank sender. If someone else pays, ask for the order serial in remarks where supported and record the actual sender with `/payer ORDER FULL_BANK_SENDER_NAME`; a missing remark does not prevent manual review.
-- Promoter referrals require a registered code after selecting Promoter. The initial codes DND-ADEEP and DND-NIRBHAY are also in the Promoters sheet. Admin `/promoters` reports booked, paid, and checked-in ticket quantities. `/addpromoter DND-CODE Name` adds a code to the live database; staff must also put the same code in the sheet. There is no live Google Sheets sync.
+- Guests selecting Promoter must enter a confirmed code, case insensitive: ADEEP20, NIRBHAY20, ISHWAR20, SHALU20, AUSTIN20, or AIRA20. The code takes 20% off each ticket: early bird S$20, presale S$24, walk-in S$28. The bot calculates the full order amount and makes a fixed amount PayNow QR; no separate UOB images are needed. The earlier DND-ADEEP and DND-NIRBHAY entries remain in the database for historical attribution but cannot be used for new bookings. Admin `/promoters` reports booked, paid, and checked-in ticket quantities. `/addpromoter NAME20 Name` activates a new 20% code in the bot; staff must also put it in the Promoters sheet. There is no live Google Sheets sync.
 - One active unpaid booking per Telegram user, 30-minute unpaid holds, atomic capacity enforcement. Submitted payments hold capacity for review. Expired payments can be reported and are explicitly reviewed against remaining capacity.
 - Staff approve only after checking the actual incoming UOB credit against the declared bank sender, amount and bank date. The receiving list showed no transaction ID, so the bot stores a clearly labelled internal match key instead of pretending one exists. The same sender, amount and bank date cannot approve two orders automatically; staff must separately resolve a genuine second identical credit. Screenshots and claims alone are insufficient.
 - One secret QR per guest; ticket labels are unique. Public order IDs include `DND26-` followed by DDMM + daily sequence + first label. Labels are not the QR secret.
@@ -23,7 +23,7 @@ Hosting is a paid background worker with a 1 GB persistent disk, one instance. R
 1. Create a Render account using the `ayodhruv` GitHub account.
 2. New -> Blueprint -> connect `ayodhruv/dnd-nights`, branch `main`, Blueprint Path `render.yaml`.
 3. Review the worker/disk charges. The blueprint uses `rootDir: telegram-bot/live`, build `pip install -r requirements.txt`, start `python app.py`, Singapore region, disk `/var/data`.
-4. Set the secret `TELEGRAM_BOT_TOKEN` in Render, privately. Keep admin ID `5117903901` (comma-separated for extra staff).
+4. Set the secret `TELEGRAM_BOT_TOKEN` in Render, privately. Configure `ADMIN_USER_IDS` with your authorised staff IDs in Render; do not publish numeric IDs in setup notes.
 5. Add private `PAYNOW_QR_PAYLOAD` in Render. On your desktop, in the folder containing your paynow.png, run:
 
    In the desktop's existing telegram-bot folder, install the extraction helper (desktop only):
