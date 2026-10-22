@@ -127,6 +127,7 @@ async def prices_cmd(u,c):
     if not await private(u):return
     current=offer()
     await say(u,'Prices per guest:\nEarly bird: S$25 through 14 November\nPresale: S$30 on 15–27 November\nWalk-in: S$35 on 28 November, subject to availability.\n\n'
+              'A confirmed promoter code gives 20% off: S$20 early bird, S$24 presale, or S$28 walk-in. Select Promoter during booking and enter the exact code (letters are case insensitive).\n\n'
               +(f'Current offer: {current[0]} · S${current[1]} per guest.' if current else 'Sales have ended.'),keys(('Book tickets','buy'),('Main menu','menu')))
 async def terms_cmd(u,c):
     if not await private(u):return
@@ -144,6 +145,7 @@ async def buy(u,c):
     if not current:return await say(u,'Ticket sales have ended.')
     tier,price=current
     await say(u,f'DND Nights · {tier}: S${price} per ticket.\nChoose up to 10 tickets in one booking.\n\n'
+        'Have a confirmed promoter code? Choose Promoter when asked how you heard about us for 20% off.\n\n'
         'Payment is by PayNow. After paying, tap I have paid and wait for a staff member to check the transaction. Your tickets arrive here after approval.\n\n'
         'Please read /terms before booking.',keys(('Continue booking','begin'),('Terms & conditions','terms'),('Main menu','menu')))
 async def cancel(u,c):
@@ -214,14 +216,15 @@ async def click(u,c):
             d['source']=source
             if source=='Promoter':
                 ledger.save(user,'promoter_code',d)
-                return await say(u,'What is your promoter’s referral code? Ask your promoter if you do not have it.')
+                return await say(u,'Enter the exact confirmed promoter code (e.g. NAME20). Capitalisation does not matter. The 20% discount appears before you confirm payment.')
             d.pop('promoter_code',None)
             ledger.save(user,'quantity',d)
             return await say(u,'Question 4 of 4: How many tickets? Choose 1–10.',quantity_keys())
         if key.startswith('qty:') and state=='quantity' and key[4:].isdigit() and 1<=int(key[4:])<=10:
             d['quantity']=int(key[4:]);ledger.save(user,'confirm',d)
             referral=f"\nPromoter: {d['promoter_code']}" if d.get('promoter_code') else ''
-            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
+            discount=f"\nPromoter discount: 20% (S${d['price']} per ticket)" if d.get('promoter_code') else ''
+            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}{discount}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
         if key=='confirm' and state=='confirm':
             if not opened() or not offer():return await say(u,'Sales are closed.')
             r=ledger.create(user,offer());await q.edit_message_reply_markup(reply_markup=None)
@@ -243,9 +246,12 @@ async def answer(u,c):
     if state=='source':return await say(u,'Please choose one of these options:',source_keys())
     if state=='promoter_code':
         code=text.upper()
-        if not ledger.promoter(code):return await say(u,'That promoter code is not recognised. Please check it with your promoter and try again.')
-        d['promoter_code']=code;ledger.save(user,'quantity',d)
-        return await say(u,'How many tickets? Choose 1–10.',quantity_keys())
+        promoter=ledger.promoter(code)
+        if not promoter:return await say(u,'That is not a confirmed promoter code. Please enter the exact NAME20 code from your promoter (capitalisation does not matter).')
+        d['promoter_code']=promoter['code']
+        d['price']=d['price']*(100-promoter['discount_percent'])//100
+        ledger.save(user,'quantity',d)
+        return await say(u,f"Code accepted: {promoter['code']}. 20% off — S${d['price']} per ticket for this offer. How many tickets? Choose 1–10.",quantity_keys())
     if state=='quantity':return await say(u,'Please choose how many tickets (1–10) using a button:',quantity_keys())
     if state=='confirm':return await say(u,'Please use a button to confirm, restart, or cancel:',keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
     await say(u,'Use /buy to book, /orders for your bookings, or /help followed by a question.')
@@ -276,10 +282,10 @@ async def deliver(bot,r,only_missing=False):
         ledger.delivered(t['token'])
 async def add_promoter_cmd(u,c):
     if not await staff(u):return
-    if len(c.args)<2:return await say(u,'Use /addpromoter DND-CODE Promoter full name. Add the same code to the Promoters sheet.')
+    if len(c.args)<2:return await say(u,'Use /addpromoter NAME20 Promoter full name. Add the same code to the Promoters sheet.')
     try:ledger.add_promoter(c.args[0],' '.join(c.args[1:]),u.effective_user.id)
     except ValueError as exc:return await say(u,str(exc))
-    await say(u,f'Promoter code {c.args[0].upper()} is active. Enter it in the Promoters sheet as well.')
+    await say(u,f'Promoter code {c.args[0].upper()} is active with 20% off. Enter it in the Promoters sheet as well.')
 async def promoters_cmd(u,c):
     if not await staff(u):return
     stats=ledger.promoter_stats()
