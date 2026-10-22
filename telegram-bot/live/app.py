@@ -91,6 +91,31 @@ async def notify(bot,text):
     for admin in ADMINS:
         try:await bot.send_message(admin,text)
         except Exception:print('Staff notification failed; the saved /review queue is available.',flush=True)
+def approval_command(r):
+    """Prefill known booking details; the admin must confirm them against UOB."""
+    details=json.loads(r['details'])
+    sender=' '.join((details.get('payer_name') or details['name']).split())
+    return f"/approve {r['serial']} {now().date().isoformat()} {r['total_cents']/100:.2f} {sender}"
+def bank_review_details(r):
+    details=json.loads(r['details'])
+    clean=lambda value:' '.join(str(value).split())
+    referral=f"\nPromoter referral: {clean(details['promoter_code'])}" if details.get('promoter_code') else ''
+    return (f"Order: {r['serial']}\n"
+            f"Guest name: {clean(details['name'])}\n"
+            f"Contact: {clean(details['contact'])}"
+            f"{referral}\n"
+            f"Declared bank sender: {clean(details.get('payer_name') or details['name'])}\n"
+            f"Quantity: {r['quantity']}\n"
+            f"Expected: S${r['total_cents']/100:.2f}\n"
+            f"State: {r['status']}")
+async def notify_payment_claim(bot,r):
+    for admin in ADMINS:
+        try:
+            await bot.send_message(admin,'PAYMENT CLAIMED — BANK CHECK REQUIRED\n'
+                +bank_review_details(r)+'\n\nCheck the incoming credit in UOB first. A guest claim is not payment confirmation. '
+                'Edit the date or sender in the next message if UOB shows different details. Use /review to retrieve this order.')
+            await bot.send_message(admin,approval_command(r))
+        except Exception:print('Staff notification failed; the saved /review queue is available.',flush=True)
 async def start(u,c):
     if not await private(u):return
     if c.args and c.args[0].startswith('check_'):
@@ -177,7 +202,7 @@ async def click(u,c):
             serial=key[5:];status=ledger.submit(serial,user)
             await say(u,'Thanks. Please wait patiently while a staff member checks your payment in UOB. Your entry tickets will arrive here once approved. Please do not pay again.\n\n'
                 f'If someone else paid, send /payer {serial} FULL_BANK_SENDER_NAME so staff can match the UOB entry.'+ ('\nThe payment window expired; staff must also check available capacity.' if status=='review_late' else ''))
-            await notify(c.bot,f'Payment claimed: {serial}\nUse /review. A guest claim is not bank confirmation.');return
+            await notify_payment_claim(c.bot,ledger.order(serial));return
         state,d=ledger.draft(user)
         if key=='begin':
             if not opened() or not offer():return await say(u,'Sales are closed.')
@@ -229,11 +254,10 @@ async def review(u,c):
     rows=ledger.queue()
     if not rows:return await say(u,'No payments awaiting review.')
     for r in rows:
-        d=json.loads(r['details'])
-        await say(u,f"REQUIRES BANK VERIFICATION\nOrder: {r['serial']}\nBooker: {d['name']}\nDeclared bank sender: {d.get('payer_name') or d['name']}\nContact: {d['contact']}\nQuantity: {r['quantity']}\nExpected: S${r['total_cents']/100:.2f}\nState: {r['status']}\n\n"
+        await say(u,"REQUIRES BANK VERIFICATION\n"+bank_review_details(r)+"\n\n"
             'Open your receiving UOB account. Match an incoming credit by bank sender full name, exact amount and bank date. Check any order remark if another person paid. If the name differs, ask the guest to use /payer ORDER FULL_BANK_SENDER_NAME. An email or guest claim alone does not verify payment.\n\n'
-            f"After checking, use:\n/approve {r['serial']} YYYY-MM-DD {r['total_cents']/100:.2f} FULL_BANK_SENDER_NAME\n\n"
-            'Replace the date and sender with what you actually see in UOB. Identical sender, amount and date used for another order are blocked for manual resolution.')
+            'The next message is a ready-to-copy command. Send it only after checking UOB. Replace the date or sender if the bank shows different details. Identical sender, amount and date used for another order are blocked for manual resolution.')
+        await say(u,approval_command(r))
 def render_ticket(t):
     link=f"https://t.me/{BOT_USERNAME}?start=check_{t['token']}"
     qr=qrcode.make(link).convert('RGB')
