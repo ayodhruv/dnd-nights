@@ -32,7 +32,7 @@ def payment_image(total_cents):
     """Change only the EMV amount and CRC of the private UOB PayNow payload."""
     payload=os.getenv('PAYNOW_QR_PAYLOAD','')
     if not payload or len(payload)>4096 or not payload.startswith('000201') or any(ord(c)<32 for c in payload):
-        raise ValueError('Set the private original UOB PAYNOW_QR_PAYLOAD.')
+        raise ValueError('Payment QR is unavailable. Contact /help for assistance.')
     if payload[-8:-4]!='6304' or f'{binascii.crc_hqx(payload[:-4].encode(),0xFFFF):04X}'!=payload[-4:].upper():
         raise ValueError('Payment QR checksum mismatch.')
     if not 1<=total_cents<=999999:raise ValueError('Payment amount is out of range.')
@@ -135,7 +135,7 @@ async def terms_cmd(u,c):
               'Each paid ticket admits one guest for one entry. A ticket QR works only once. Keep it private; copied or forwarded QRs cannot provide another entry.\n\n'
               'Guest cancellations and change of plans are non-refundable. If the organiser cancels the event, ticket payments will be refunded. '
               'If the organiser reschedules, you may keep your ticket for the new date or request a refund. Contact /help with your order serial for those cases.\n\n'
-              'Bookings depend on remaining capacity. Tickets are issued after a staff member confirms the incoming PayNow credit in UOB. '
+              'Bookings depend on remaining capacity. Tickets are issued after a staff member confirms the incoming PayNow credit. '
               'We store the name, contact and Telegram ID supplied for booking, payment support and admission.',
               keys(('Book tickets','buy'),('Main menu','menu')))
 async def buy(u,c):
@@ -152,9 +152,17 @@ async def cancel(u,c):
     if await private(u):ledger.clear(u.effective_user.id);await say(u,'Draft cancelled. Existing orders remain in /orders. Contact /help to resolve an existing payment.')
 async def help_cmd(u,c):
     if not await private(u):return
-    await say(u,'Need help? Message Austin on Telegram: @austisms\n'
-              'Include your order serial (if you have one) and a short description of the issue.',
-              InlineKeyboardMarkup([[InlineKeyboardButton('Message Austin',url='https://t.me/austisms')]]))
+    await say(u,'Message one of our <a href="https://t.me/austisms">Admins</a>.',parse_mode='HTML')
+def guest_order_status(status):
+    return {
+        'paid':'✅ Paid',
+        'review':'⏳ Pending approval from DND staff',
+        'review_late':'⏳ Pending approval from DND staff',
+        'pending':'❌ Not paid',
+        'expired':'❌ Payment window expired',
+        'rejected':'❌ Booking rejected',
+        'void':'❌ Ticket voided',
+    }.get(status,'Status unavailable — contact /help')
 async def orders(u,c):
     if not await private(u):return
     rows=ledger.orders(u.effective_user.id)
@@ -163,7 +171,7 @@ async def orders(u,c):
         markup=keys(('View payment QR','pay:'+r['serial']),('I have paid','paid:'+r['serial'])) if r['status']=='pending' else None
         if r['status']=='expired':markup=keys(('I already paid — request review','paid:'+r['serial']))
         d=json.loads(r['details'])
-        await say(u,f"Order {r['serial']}\nQuantity: {r['quantity']}\nTotal: S${r['total_cents']/100:.2f}\nExpected bank sender: {d.get('payer_name') or d['name']}\nStatus: {r['status']}",markup)
+        await say(u,f"Order {escape(r['serial'])}\nQuantity: {r['quantity']}\nTotal: <b>S${r['total_cents']/100:.2f}</b>\nExpected bank sender: {escape(d.get('payer_name') or d['name'])}\nStatus: {guest_order_status(r['status'])}",markup,parse_mode='HTML')
 async def payment(u,r):
     if r['user_id']!=u.effective_user.id:return await say(u,'Order unavailable.')
     if r['status']!='pending':return await say(u,'Payment window is closed or this order was submitted. Do not pay again. Use /orders or /help.')
@@ -199,8 +207,8 @@ async def click(u,c):
             return await payment(u,r) if r else await say(u,'Order unavailable.')
         if key.startswith('paid:'):
             serial=key[5:];status=ledger.submit(serial,user)
-            await say(u,'Thanks. Please wait patiently while a staff member checks your payment in UOB. Your entry tickets will arrive here once approved. Please do not pay again.\n\n'
-                f'If someone else paid, send /payer {serial} FULL_BANK_SENDER_NAME so staff can match the UOB entry.'+ ('\nThe payment window expired; staff must also check available capacity.' if status=='review_late' else ''))
+            await say(u,'Thanks. Please wait patiently while a staff member checks your payment. Your entry tickets will arrive here once approved. Please do not pay again.\n\n'
+                f'If someone else paid, send /payer {serial} FULL_BANK_SENDER_NAME so staff can match the incoming payment.'+ ('\nThe payment window expired; staff must also check available capacity.' if status=='review_late' else ''))
             await notify_payment_claim(c.bot,ledger.order(serial));return
         state,d=ledger.draft(user)
         if key=='begin':
@@ -310,7 +318,7 @@ async def payer_cmd(u,c):
     serial=c.args[0]
     try:status=ledger.set_payer(serial,u.effective_user.id,' '.join(c.args[1:]))
     except ValueError as exc:return await say(u,str(exc))
-    await say(u,'Payer name saved for this order. Staff will still verify the incoming payment in UOB. Do not pay twice.')
+    await say(u,'Payer name saved for this order. Staff will still verify the incoming payment. Do not pay twice.')
     if status in ('review','review_late'):await notify(c.bot,f'Payer name updated for {serial}. Check /review and verify the bank credit before approval.')
 async def tickets(u,c):
     if not await private(u):return
@@ -422,7 +430,7 @@ async def setup(app):
     hook=await app.bot.get_webhook_info()
     if hook.url:raise RuntimeError('Existing webhook found. Stop the old backend and remove the webhook deliberately before running this polling bot.')
     BOT_USERNAME=app.bot.username
-    await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('event','Date and location'),BotCommand('prices','Ticket prices'),BotCommand('terms','Terms and conditions'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact Austin'),BotCommand('cancel','Cancel booking draft')])
+    await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact an admin')])
     app.bot_data['maintenance']=asyncio.create_task(maintenance(app))
     bridge=DoorBridge(ledger,ADMINS,os.environ['TELEGRAM_BOT_TOKEN'])
     app.bot_data['door_bridge']=bridge
