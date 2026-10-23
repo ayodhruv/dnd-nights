@@ -152,12 +152,9 @@ async def cancel(u,c):
     if await private(u):ledger.clear(u.effective_user.id);await say(u,'Draft cancelled. Existing orders remain in /orders. Contact /help to resolve an existing payment.')
 async def help_cmd(u,c):
     if not await private(u):return
-    if c.args:
-        ledger.remember(u.effective_user.id)
-        msg=' '.join(c.args)[:1000]
-        await notify(c.bot,f"Guest support request\nTelegram ID: {u.effective_user.id}\nName: {u.effective_user.full_name}\n{msg}")
-        return await say(u,'Your message was sent to the organisers. Keep this chat open for their reply.')
-    await say(u,'Send /help followed by your question and order serial. The organisers will reply here.\n\nIf someone else paid, send /payer ORDER FULL_BANK_SENDER_NAME. Do not pay again while waiting. Never send a bank password or OTP.')
+    await say(u,'Need help? Message Austin on Telegram: @austisms\n'
+              'Include your order serial (if you have one) and a short description of the issue.',
+              InlineKeyboardMarkup([[InlineKeyboardButton('Message Austin',url='https://t.me/austisms')]]))
 async def orders(u,c):
     if not await private(u):return
     rows=ledger.orders(u.effective_user.id)
@@ -254,7 +251,7 @@ async def answer(u,c):
         return await say(u,f"Code accepted: {promoter['code']}. 20% off — S${d['price']} per ticket for this offer. How many tickets? Choose 1–10.",quantity_keys())
     if state=='quantity':return await say(u,'Please choose how many tickets (1–10) using a button:',quantity_keys())
     if state=='confirm':return await say(u,'Please use a button to confirm, restart, or cancel:',keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
-    await say(u,'Use /buy to book, /orders for your bookings, or /help followed by a question.')
+    await say(u,'Use /buy to book, /orders for your bookings, or /help for assistance.')
 async def review(u,c):
     if not await staff(u):return
     rows=ledger.queue()
@@ -425,7 +422,7 @@ async def setup(app):
     hook=await app.bot.get_webhook_info()
     if hook.url:raise RuntimeError('Existing webhook found. Stop the old backend and remove the webhook deliberately before running this polling bot.')
     BOT_USERNAME=app.bot.username
-    await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('event','Date and location'),BotCommand('prices','Ticket prices'),BotCommand('terms','Terms and conditions'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact organisers'),BotCommand('cancel','Cancel booking draft')])
+    await app.bot.set_my_commands([BotCommand('start','Main menu'),BotCommand('buy','Book tickets'),BotCommand('orders','My orders'),BotCommand('event','Date and location'),BotCommand('prices','Ticket prices'),BotCommand('terms','Terms and conditions'),BotCommand('tickets','Resend paid tickets'),BotCommand('help','Contact Austin'),BotCommand('cancel','Cancel booking draft')])
     app.bot_data['maintenance']=asyncio.create_task(maintenance(app))
     bridge=DoorBridge(ledger,ADMINS,os.environ['TELEGRAM_BOT_TOKEN'])
     app.bot_data['door_bridge']=bridge
