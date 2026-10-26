@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlparse
 import httpx
 
-DEFAULT_URL='https://deepavali-afterglow-2026-sg.goldenzebra10.chatgpt.site'
+DEFAULT_URL='https://deepavali-afterglow-2026-sg.ayodhruv.chatgpt.site'
 
 class DoorBridge:
     def __init__(self, ledger, admins, bot_token):
