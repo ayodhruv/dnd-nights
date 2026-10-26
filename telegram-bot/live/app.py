@@ -127,7 +127,7 @@ async def prices_cmd(u,c):
     if not await private(u):return
     current=offer()
     await say(u,'Prices per guest:\nEarly bird: S$25 through 14 November\nPresale: S$30 on 15–27 November\nWalk-in: S$35 on 28 November, subject to availability.\n\n'
-              'A confirmed promoter code gives 20% off: S$20 early bird, S$24 presale, or S$28 walk-in. Select Promoter during booking and enter the exact code (letters are case insensitive).\n\n'
+              +('A confirmed promoter code gives 20% off: S$20 early bird, S$24 presale, or S$28 walk-in. Select Promoter during booking and enter the exact code (letters are case insensitive).\n\n' if ledger.promoter_discounts_enabled() else 'Promoter discounts are temporarily paused. Referral codes can still be recorded; standard ticket prices apply.\n\n')
               +(f'Current offer: {current[0]} · S${current[1]} per guest.' if current else 'Sales have ended.'),keys(('Book tickets','buy'),('Main menu','menu')))
 async def terms_cmd(u,c):
     if not await private(u):return
@@ -221,14 +221,22 @@ async def click(u,c):
             d['source']=source
             if source=='Promoter':
                 ledger.save(user,'promoter_code',d)
-                return await say(u,'Enter the exact confirmed promoter code (e.g. NAME20). Capitalisation does not matter. The 20% discount appears before you confirm payment.')
+                note='The 20% discount appears before you confirm payment.' if ledger.promoter_discounts_enabled() else 'Discounts are temporarily paused; your referral will be recorded at the standard ticket price.'
+                return await say(u,'Enter the exact confirmed promoter code (e.g. NAME20). Capitalisation does not matter. '+note)
             d.pop('promoter_code',None)
             ledger.save(user,'quantity',d)
             return await say(u,'Question 4 of 4: How many tickets? Choose 1–10.',quantity_keys())
         if key.startswith('qty:') and state=='quantity' and key[4:].isdigit() and 1<=int(key[4:])<=10:
+            if d.get('promoter_code'):
+                promoter=ledger.promoter(d['promoter_code'])
+                if not promoter:raise ValueError('This promoter code is unavailable. Please start again with /buy.')
+                current=offer()
+                if not current or current[0]!=d['tier']:raise ValueError('The offer changed. Please start again with /buy.')
+                d['discount_percent']=promoter['discount_percent'] if ledger.promoter_discounts_enabled() else 0
+                d['price']=current[1]*(100-d['discount_percent'])//100
             d['quantity']=int(key[4:]);ledger.save(user,'confirm',d)
             referral=f"\nPromoter: {d['promoter_code']}" if d.get('promoter_code') else ''
-            discount=f"\nPromoter discount: 20% (S${d['price']} per ticket)" if d.get('promoter_code') else ''
+            discount=(f"\nPromoter discount: 20% (S${d['price']} per ticket)" if d.get('discount_percent') else '\nPromoter discounts are paused; standard price applies.') if d.get('promoter_code') else ''
             return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}{discount}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
         if key=='confirm' and state=='confirm':
             if not opened() or not offer():return await say(u,'Sales are closed.')
@@ -254,9 +262,11 @@ async def answer(u,c):
         promoter=ledger.promoter(code)
         if not promoter:return await say(u,'That is not a confirmed promoter code. Please enter the exact NAME20 code from your promoter (capitalisation does not matter).')
         d['promoter_code']=promoter['code']
-        d['price']=d['price']*(100-promoter['discount_percent'])//100
+        d['discount_percent']=promoter['discount_percent'] if ledger.promoter_discounts_enabled() else 0
+        d['price']=d['price']*(100-d['discount_percent'])//100
         ledger.save(user,'quantity',d)
-        return await say(u,f"Code accepted: {promoter['code']}. 20% off — S${d['price']} per ticket for this offer. How many tickets? Choose 1–10.",quantity_keys())
+        discount_note="20% off" if d['discount_percent'] else "Referral recorded. Discounts are temporarily paused"
+        return await say(u,f"Code accepted: {promoter['code']}. {discount_note} — S${d['price']} per ticket for this offer. How many tickets? Choose 1–10.",quantity_keys())
     if state=='quantity':return await say(u,'Please choose how many tickets (1–10) using a button:',quantity_keys())
     if state=='confirm':return await say(u,'Please use a button to confirm, restart, or cancel:',keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
     await say(u,'Use /buy to book, /orders for your bookings, or /help for assistance.')
@@ -290,11 +300,22 @@ async def add_promoter_cmd(u,c):
     if len(c.args)<2:return await say(u,'Use /addpromoter NAME20 Promoter full name. Add the same code to the Promoters sheet.')
     try:ledger.add_promoter(c.args[0],' '.join(c.args[1:]),u.effective_user.id)
     except ValueError as exc:return await say(u,str(exc))
-    await say(u,f'Promoter code {c.args[0].upper()} is active with 20% off. Enter it in the Promoters sheet as well.')
+    status='20% discounts are open.' if ledger.promoter_discounts_enabled() else 'Discounts are paused; the code is saved for reopening and can track referrals now.'
+    await say(u,f'Promoter code {c.args[0].upper()} saved. {status} Enter it in the Promoters sheet as well.')
+async def promoter_discounts_cmd(u,c):
+    if not await staff(u):return
+    if len(c.args)!=1 or c.args[0].lower() not in ('on','off'):
+        state='OPEN' if ledger.promoter_discounts_enabled() else 'PAUSED'
+        return await say(u,f'Promoter discounts: {state}. Use /promodiscounts on or /promodiscounts off. Existing orders keep their quoted price.')
+    enabled=c.args[0].lower()=='on'
+    ledger.set_promoter_discounts(enabled,u.effective_user.id)
+    await say(u,'Promoter discounts are now '+('OPEN: valid codes give 20% off new bookings.' if enabled else 'PAUSED: new bookings use standard prices; referral tracking remains available.')+' Existing orders keep their quoted price.')
+
 async def promoters_cmd(u,c):
     if not await staff(u):return
     stats=ledger.promoter_stats()
-    await say(u,'Promoter counts (ticket quantities):\n'+'\n'.join(
+    state='OPEN' if ledger.promoter_discounts_enabled() else 'PAUSED'
+    await say(u,f'Promoter discounts: {state}\nPromoter counts (ticket quantities):\n'+'\n'.join(
         f"{p['name']} · {p['code']}: {p['booked']} booked, {p['paid']} paid, {p['checked_in']} checked in"
         for p in stats))
 async def approve(u,c):
@@ -461,7 +482,7 @@ if __name__=='__main__':
     except (ValueError,OSError):raise SystemExit('Add valid private PAYNOW_QR_PAYLOAD in Render.')
     ledger=Ledger(DATA/'dnd-live.sqlite3',int(os.getenv('EVENT_CAPACITY','230')),os.getenv('EVENT_ID','DND26'))
     app=Application.builder().token(token).concurrent_updates(False).post_init(setup).post_stop(shutdown).build()
-    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('event',event_cmd),('prices',prices_cmd),('terms',terms_cmd),('tickets',tickets),('cancel',cancel),('help',help_cmd),('payer',payer_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('addpromoter',add_promoter_cmd),('promoters',promoters_cmd),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
+    for cmd,fn in [('start',start),('buy',buy),('orders',orders),('event',event_cmd),('prices',prices_cmd),('terms',terms_cmd),('tickets',tickets),('cancel',cancel),('help',help_cmd),('payer',payer_cmd),('whoami',whoami),('review',review),('approve',approve),('resend',resend),('addpromoter',add_promoter_cmd),('promoters',promoters_cmd),('promodiscounts',promoter_discounts_cmd),('check',check),('reject',resolve),('void',resolve),('reply',reply),('backup',backup_cmd),('scanner',scanner_cmd),('grantdoor',grant_door_cmd),('revokedoor',revoke_door_cmd),('doorstaff',door_staff_cmd)]:app.add_handler(CommandHandler(cmd,fn))
     app.add_handler(CallbackQueryHandler(click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)
