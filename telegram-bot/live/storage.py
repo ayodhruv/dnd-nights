@@ -51,6 +51,7 @@ class Ledger:
             if existing and existing[0] != event_id:
                 raise ValueError('This database belongs to a different event.')
             db.execute("INSERT OR IGNORE INTO meta VALUES('event_id',?)", (event_id,))
+            db.execute("INSERT OR IGNORE INTO meta VALUES('promoter_discounts_enabled','false')")
             # Preserve old orders and promoter attribution while migrating the live SQLite file.
             if 'discount_percent' not in {r['name'] for r in db.execute('PRAGMA table_info(promoters)')}:
                 db.execute('ALTER TABLE promoters ADD COLUMN discount_percent INTEGER NOT NULL DEFAULT 0')
@@ -59,7 +60,9 @@ class Ledger:
                 db.execute('INSERT OR IGNORE INTO promoters(code,name,created_at) VALUES(?,?,?)',(code,name,now().isoformat()))
             # Confirmed NAME20 codes from the DND Promoters sheet.
             for code,name in (('ADEEP20','Adeep'),('NIRBHAY20','Nirbhay'),('ISHWAR20','Ishwar'),
-                              ('SHALU20','Shalu'),('AUSTIN20','Austin'),('AIRA20','Ira')):
+                              ('SHALU20','Shalu'),('AUSTIN20','Austin'),('AIRA20','Ira'),
+                              ('JESWANT20','Jeswant'),('AESHA20','Aesha'),('MEERA20','Meera'),
+                              ('HREHAN20','Hrehan'),('DHRUV20','Dhruv')):
                 db.execute('INSERT INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,20) '
                            'ON CONFLICT(code) DO UPDATE SET name=excluded.name,discount_percent=20',
                            (code,name,now().isoformat()))
@@ -95,7 +98,9 @@ class Ledger:
                 code=d.get('promoter_code','').strip().upper()
                 promoter=db.execute('SELECT discount_percent FROM promoters WHERE code=? AND discount_percent=20',(code,)).fetchone()
                 if not promoter:raise ValueError('This code is not a confirmed promoter code. Ask your promoter for a NAME20 code and start again with /buy.')
-                expected_price=base_price*(100-promoter['discount_percent'])//100
+                discount=promoter['discount_percent'] if self._promoter_discounts_enabled(db) else 0
+                expected_price=base_price*(100-discount)//100
+                d['discount_percent']=discount
                 d['promoter_code']=code
             elif d.get('promoter_code'):
                 raise ValueError('Please start again with /buy to choose your referral source.')
@@ -214,6 +219,18 @@ class Ledger:
     def known(self,user):
         with self.db() as db:return bool(db.execute('SELECT 1 FROM contacts WHERE user_id=?',(user,)).fetchone())
 
+    @staticmethod
+    def _promoter_discounts_enabled(db):
+        row=db.execute("SELECT value FROM meta WHERE key='promoter_discounts_enabled'").fetchone()
+        return bool(row and row[0]=='true')
+    def promoter_discounts_enabled(self):
+        with self.db() as db:return self._promoter_discounts_enabled(db)
+    def set_promoter_discounts(self,enabled,admin):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("INSERT INTO meta(key,value) VALUES('promoter_discounts_enabled',?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value",('true' if enabled else 'false',))
+            self.audit(db,None,'promoter_discounts_on' if enabled else 'promoter_discounts_off',admin)
     def promoter(self,code):
         with self.db() as db:return db.execute('SELECT * FROM promoters WHERE code=? AND discount_percent=20',(code.strip().upper(),)).fetchone()
     def add_promoter(self,code,name,admin):
