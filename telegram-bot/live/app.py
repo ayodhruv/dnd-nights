@@ -78,8 +78,19 @@ def offer():
 def keys(*items):return InlineKeyboardMarkup([[InlineKeyboardButton(label,callback_data=value)] for label,value in items])
 def quantity_keys():
     return InlineKeyboardMarkup([[InlineKeyboardButton(str(n),callback_data=f'qty:{n}') for n in row]
-                                 for row in (range(1,6),range(6,11))])
-def source_keys():return keys(('Instagram','source:Instagram'),('Friend','source:Friend'),('Promoter','source:Promoter'),('Other','source:Other'))
+                                 for row in (range(1,6),range(6,11))]
+                                +[[InlineKeyboardButton('← Back',callback_data='back:quantity')]])
+def source_keys():return keys(('Instagram','source:Instagram'),('Friend','source:Friend'),('Promoter','source:Promoter'),('Other','source:Other'),('← Back','back:source'))
+def back_keys(state):return keys(('← Back','back:'+state))
+def confirmation_keys():return keys(('Confirm booking','confirm'),('← Back','back:confirm'),('Start again','begin'),('Cancel draft','cancel'))
+async def booking_question(u,state):
+    if state=='name':return await say(u,'Question 1 of 4: What is your full name?',back_keys(state))
+    if state=='contact':return await say(u,'Question 2 of 4: Your phone number or Instagram handle?',back_keys(state))
+    if state=='source':return await say(u,'Question 3 of 4: Where did you hear about us?',source_keys())
+    if state=='promoter_code':
+        note='A valid code gives 20% off.' if ledger.promoter_discounts_enabled() else 'Discounts are currently unavailable.'
+        return await say(u,'Enter your promoter’s referral code. This records who referred you. '+note+' Capitalisation does not matter. No code? Tap ← Back to choose another source.',back_keys(state))
+    if state=='quantity':return await say(u,'Question 4 of 4: How many tickets? Choose 1–10.',quantity_keys())
 async def say(u,text,markup=None,parse_mode=None):await u.effective_chat.send_message(text,reply_markup=markup,parse_mode=parse_mode)
 async def private(u):return bool(u.effective_chat and u.effective_chat.type=='private')
 async def staff(u):
@@ -215,18 +226,29 @@ async def click(u,c):
         if key=='begin':
             if not opened() or not offer():return await say(u,'Sales are closed.')
             tier,price=offer();ledger.save(user,'name',dict(tier=tier,price=price))
-            return await say(u,'Question 1 of 4: What is your full name?')
+            return await booking_question(u,'name')
+        if key.startswith('back:'):
+            if key[5:]!=state or state not in ('name','contact','source','promoter_code','quantity','confirm'):
+                return await say(u,'That Back button belongs to an earlier step. Use the buttons on the latest question, or /buy to restart.')
+            if state=='name':return await buy(u,c)
+            target={'contact':'name','source':'contact','promoter_code':'source',
+                    'quantity':'promoter_code' if d.get('source')=='Promoter' else 'source',
+                    'confirm':'quantity'}[state]
+            ledger.save(user,target,d)
+            return await booking_question(u,target)
         if key.startswith('source:') and state=='source':
             source=key[7:]
             if source not in ('Instagram','Friend','Promoter','Other'):return
+            current=offer()
+            if not current or current[0]!=d['tier']:raise ValueError('The offer changed. Please start again with /buy.')
             d['source']=source
+            d['price']=current[1]
+            for field in ('promoter_code','discount_percent','quantity'):d.pop(field,None)
             if source=='Promoter':
                 ledger.save(user,'promoter_code',d)
-                note='The 20% discount appears before you confirm payment.' if ledger.promoter_discounts_enabled() else 'Discounts are temporarily paused; your referral will be recorded at the standard ticket price.'
-                return await say(u,'Enter the exact confirmed promoter code (e.g. NAME20). Capitalisation does not matter. '+note)
-            d.pop('promoter_code',None)
+                return await booking_question(u,'promoter_code')
             ledger.save(user,'quantity',d)
-            return await say(u,'Question 4 of 4: How many tickets? Choose 1–10.',quantity_keys())
+            return await booking_question(u,'quantity')
         if key.startswith('qty:') and state=='quantity' and key[4:].isdigit() and 1<=int(key[4:])<=10:
             if d.get('promoter_code'):
                 promoter=ledger.promoter(d['promoter_code'])
@@ -238,7 +260,7 @@ async def click(u,c):
             d['quantity']=int(key[4:]);ledger.save(user,'confirm',d)
             referral=f"\nPromoter: {d['promoter_code']}" if d.get('promoter_code') else ''
             discount=(f"\nPromoter discount: 20% (S${d['price']} per ticket)" if d.get('discount_percent') else '\nPromoter discounts are paused; standard price applies.') if d.get('promoter_code') else ''
-            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}{discount}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
+            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}{discount}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",confirmation_keys())
         if key=='confirm' and state=='confirm':
             if not opened() or not offer():return await say(u,'Sales are closed.')
             r=ledger.create(user,offer());await q.edit_message_reply_markup(reply_markup=None)
@@ -250,26 +272,28 @@ async def answer(u,c):
     if not await private(u):return
     user=u.effective_user.id;text=u.message.text.strip();state,d=ledger.draft(user)
     if state=='name':
-        if not 2<=len(text)<=80:return await say(u,'Enter a name between 2 and 80 characters.')
+        if not 2<=len(text)<=80:return await say(u,'Enter a name between 2 and 80 characters.',back_keys(state))
         d['name']=text;ledger.save(user,'contact',d)
-        return await say(u,'Question 2 of 4: Your phone number or Instagram handle?')
+        return await booking_question(u,'contact')
     if state=='contact':
-        if not 3<=len(text)<=80:return await say(u,'Enter a contact between 3 and 80 characters.')
+        if not 3<=len(text)<=80:return await say(u,'Enter a contact between 3 and 80 characters.',back_keys(state))
         d['contact']=text;ledger.save(user,'source',d)
-        return await say(u,'Question 3 of 4: Where did you hear about us?',source_keys())
+        return await booking_question(u,'source')
     if state=='source':return await say(u,'Please choose one of these options:',source_keys())
     if state=='promoter_code':
         code=text.upper()
         promoter=ledger.promoter(code)
-        if not promoter:return await say(u,'That is not a confirmed promoter code. Please enter the exact NAME20 code from your promoter (capitalisation does not matter).')
+        if not promoter:return await say(u,'That code was not recognised. Check it with your promoter, or tap ← Back to choose another source.',back_keys(state))
+        current=offer()
+        if not current or current[0]!=d['tier']:return await say(u,'The offer changed. Please start again with /buy.')
         d['promoter_code']=promoter['code']
         d['discount_percent']=promoter['discount_percent'] if ledger.promoter_discounts_enabled() else 0
-        d['price']=d['price']*(100-d['discount_percent'])//100
+        d['price']=current[1]*(100-d['discount_percent'])//100
         ledger.save(user,'quantity',d)
         discount_note="20% off" if d['discount_percent'] else "Referral recorded. Discounts are temporarily paused"
         return await say(u,f"Code accepted: {promoter['code']}. {discount_note} — S${d['price']} per ticket for this offer. How many tickets? Choose 1–10.",quantity_keys())
     if state=='quantity':return await say(u,'Please choose how many tickets (1–10) using a button:',quantity_keys())
-    if state=='confirm':return await say(u,'Please use a button to confirm, restart, or cancel:',keys(('Confirm booking','confirm'),('Start again','begin'),('Cancel draft','cancel')))
+    if state=='confirm':return await say(u,'Please use a button to confirm, go back, restart, or cancel:',confirmation_keys())
     await say(u,'Use /buy to book, /orders for your bookings, or /help for assistance.')
 async def review(u,c):
     if not await staff(u):return
@@ -488,3 +512,4 @@ if __name__=='__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)
     app.run_polling(allowed_updates=['message','callback_query'],drop_pending_updates=False)
+
