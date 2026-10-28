@@ -145,7 +145,8 @@ async def buy(u,c):
     if not current:return await say(u,'Ticket sales have ended.')
     tier,price=current
     await say(u,f'DND Nights · {tier}: S${price} per ticket.\nChoose up to 10 tickets in one booking.\n\n'
-        'Have a confirmed promoter code? Choose Promoter when asked how you heard about us for 20% off.\n\n'
+        +('Have a confirmed promoter code? Choose Promoter when asked how you heard about us for 20% off.\n\n' if ledger.promoter_discounts_enabled() else 'Promoter discounts are temporarily paused. Standard ticket prices apply.\n\n')
+        +
         'Payment is by PayNow. After paying, tap I have paid and wait for a staff member to check the transaction. Your tickets arrive here after approval.\n\n'
         'Please read /terms before booking.',keys(('Continue booking','begin'),('Terms & conditions','terms'),('Main menu','menu')))
 async def cancel(u,c):
