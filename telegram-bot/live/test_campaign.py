@@ -44,8 +44,8 @@ class CampaignFixture(unittest.TestCase):
         return rows
 
 class CampaignTests(CampaignFixture):
-    def test_all_thirteen_promoters_and_case_insensitive_codes(self):
-        self.assertEqual(len(PROMOTERS),13)
+    def test_all_fourteen_promoters_and_case_insensitive_codes(self):
+        self.assertEqual(len(PROMOTERS),14)
         for stem,_ in PROMOTERS:
             self.assertEqual(self.ledger.quote((stem+'free').lower(),('Early bird',25))['price_cents'],2500)
             with self.assertRaisesRegex(ValueError,'not active yet'):self.ledger.quote(stem+'10',('Early bird',25))

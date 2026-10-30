@@ -36,6 +36,7 @@ approved ticket count, awarded drinks and attribution by promoter.
 | Dhruv | DHRUVFREE | DHRUV10 |
 | Niheela | NIHEELAFREE | NIHEELA10 |
 | Sachin | SACHINFREE | SACHIN10 |
+| Dheena | DHEENAFREE | DHEENA10 |
 
 Codes are exact apart from case and surrounding whitespace. `/addpromoter NAME Full Name`
 creates both code variants for a new promoter. `/promodiscounts off` manually

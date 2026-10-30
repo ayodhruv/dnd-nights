@@ -22,7 +22,7 @@ def name_key(value):return bank_name(value).casefold()
 PROMOTERS=(('ADEEP','Adeep'),('NIRBHAY','Nirbhay'),('ISHWAR','Ishwar'),
            ('SHALU','Shalu'),('AUSTIN','Austin'),('AIRA','Ira'),
            ('JESWANT','Jeswant'),('AESHA','Aesha'),('MEERA','Meera'),
-           ('HREHAN','Hrehan'),('DHRUV','Dhruv'),('NIHEELA','Niheela'),('SACHIN','Sachin'))
+           ('HREHAN','Hrehan'),('DHRUV','Dhruv'),('NIHEELA','Niheela'),('SACHIN','Sachin'),('DHEENA','Dheena'))
 PROMO_LIMIT=100
 
 class Ledger:
