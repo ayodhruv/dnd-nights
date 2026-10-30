@@ -72,9 +72,17 @@ def payment_image(total_cents):
 def opened():return os.getenv('SALES_OPEN','false').lower()=='true'
 def offer():
     today=now().date();event=date.fromisoformat(os.getenv('EVENT_DATE','2026-11-28'))
-    if today>event:return None
-    if today==event:return 'Walk-in',35
-    return ('Early bird',25) if today<=date.fromisoformat(os.getenv('EARLY_BIRD_CUTOFF','2026-11-14')) else ('Presale',30)
+    return ledger.sales_offer(today,event)
+def promo_copy():
+    return ('Have a promoter’s free-drink code? Choose Promoter during booking. Only tickets among the first 100 approved qualify for a free drink.\n\n'
+            if ledger.campaign()['free_open'] else 'If a promoter referred you, choose Promoter during booking.\n\n')
+def refresh_quote(d,current):
+    if not current or current[0]!=d['tier']:raise ValueError('The offer changed. Please restart with /buy. Existing orders keep their quoted total.')
+    d.update(ledger.quote(d.get('promoter_code'),current));d.pop('price',None)
+def drink_note(d):
+    if d.get('promotion')!='free_drink':return ''
+    if 'free_drinks_awarded' in d:return f"\nFree drinks confirmed: {d['free_drinks_awarded']} of {d['quantity']} ticket(s)."
+    return '\nFree-drink eligibility is confirmed on approval, limited to the first 100 approved tickets across all promoters. A group may qualify in part.'
 def keys(*items):return InlineKeyboardMarkup([[InlineKeyboardButton(label,callback_data=value)] for label,value in items])
 def quantity_keys():
     return InlineKeyboardMarkup([[InlineKeyboardButton(str(n),callback_data=f'qty:{n}') for n in row]
@@ -88,8 +96,7 @@ async def booking_question(u,state):
     if state=='contact':return await say(u,'Question 2 of 4: Your phone number or Instagram handle?',back_keys(state))
     if state=='source':return await say(u,'Question 3 of 4: Where did you hear about us?',source_keys())
     if state=='promoter_code':
-        note='A valid code gives 20% off.' if ledger.promoter_discounts_enabled() else 'Discounts are currently unavailable.'
-        return await say(u,'Enter your promoter’s referral code. This records who referred you. '+note+' Capitalisation does not matter. No code? Tap ← Back to choose another source.',back_keys(state))
+        return await say(u,'Enter the exact code your promoter gave you. Capitalisation does not matter. No code? Tap ← Back to choose another source.',back_keys(state))
     if state=='quantity':return await say(u,'Question 4 of 4: How many tickets? Choose 1–10.',quantity_keys())
 async def say(u,text,markup=None,parse_mode=None):await u.effective_chat.send_message(text,reply_markup=markup,parse_mode=parse_mode)
 async def private(u):return bool(u.effective_chat and u.effective_chat.type=='private')
@@ -137,8 +144,8 @@ async def event_cmd(u,c):
 async def prices_cmd(u,c):
     if not await private(u):return
     current=offer()
-    await say(u,'Prices per guest:\nEarly bird: S$25 through 14 November\nPresale: S$30 on 15–27 November\nWalk-in: S$35 on 28 November, subject to availability.\n\n'
-              +('A confirmed promoter code gives 20% off: S$20 early bird, S$24 presale, or S$28 walk-in. Select Promoter during booking and enter the exact code (letters are case insensitive).\n\n' if ledger.promoter_discounts_enabled() else 'Promoter discounts are temporarily paused. Referral codes can still be recorded; standard ticket prices apply.\n\n')
+    await say(u,'Prices per guest:\nEarly bird: S$25 until 100 tickets have been approved.\nGeneral: S$30 after the first 100 approvals.\nWalk-in: S$35 on 28 November, subject to availability.\n\n'
+              +promo_copy()
               +(f'Current offer: {current[0]} · S${current[1]} per guest.' if current else 'Sales have ended.'),keys(('Book tickets','buy'),('Main menu','menu')))
 async def terms_cmd(u,c):
     if not await private(u):return
@@ -147,6 +154,9 @@ async def terms_cmd(u,c):
               'Guest cancellations and change of plans are non-refundable. If the organiser cancels the event, ticket payments will be refunded. '
               'If the organiser reschedules, you may keep your ticket for the new date or request a refund. Contact /help with your order serial for those cases.\n\n'
               'Bookings depend on remaining capacity. Tickets are issued after a staff member confirms the incoming PayNow credit. '
+              'Free-drink codes do not reduce the ticket price. Only eligible tickets within the first 100 approved tickets qualify; '
+              'the limit is shared across all promoters and includes tickets bought without a code. Eligibility follows staff approval order, '
+              'not booking time or tapping I have paid. Group bookings may qualify only in part. Each awarded drink can be redeemed once. Offers cannot be combined. '
               'We store the name, contact and Telegram ID supplied for booking, payment support and admission.',
               keys(('Book tickets','buy'),('Main menu','menu')))
 async def buy(u,c):
@@ -156,7 +166,7 @@ async def buy(u,c):
     if not current:return await say(u,'Ticket sales have ended.')
     tier,price=current
     await say(u,f'DND Nights · {tier}: S${price} per ticket.\nChoose up to 10 tickets in one booking.\n\n'
-        +('Have a confirmed promoter code? Choose Promoter when asked how you heard about us for 20% off.\n\n' if ledger.promoter_discounts_enabled() else 'Promoter discounts are temporarily paused. Standard ticket prices apply.\n\n')
+        +promo_copy()
         +
         'Payment is by PayNow. After paying, tap I have paid and wait for a staff member to check the transaction. Your tickets arrive here after approval.\n\n'
         'Please read /terms before booking.',keys(('Continue booking','begin'),('Terms & conditions','terms'),('Main menu','menu')))
@@ -183,7 +193,7 @@ async def orders(u,c):
         markup=keys(('View payment QR','pay:'+r['serial']),('I have paid','paid:'+r['serial'])) if r['status']=='pending' else None
         if r['status']=='expired':markup=keys(('I already paid — request review','paid:'+r['serial']))
         d=json.loads(r['details'])
-        await say(u,f"Order {escape(r['serial'])}\nQuantity: {r['quantity']}\nTotal: <b>S${r['total_cents']/100:.2f}</b>\nExpected bank sender: {escape(d.get('payer_name') or d['name'])}\nStatus: {guest_order_status(r['status'])}",markup,parse_mode='HTML')
+        await say(u,f"Order {escape(r['serial'])}\nQuantity: {r['quantity']}\nTotal: <b>S${r['total_cents']/100:.2f}</b>\nExpected bank sender: {escape(d.get('payer_name') or d['name'])}\nStatus: {guest_order_status(r['status'])}{drink_note(d)}",markup,parse_mode='HTML')
 async def payment(u,r):
     if r['user_id']!=u.effective_user.id:return await say(u,'Order unavailable.')
     if r['status']!='pending':return await say(u,'Payment window is closed or this order was submitted. Do not pay again. Use /orders or /help.')
@@ -191,11 +201,10 @@ async def payment(u,r):
         f"{r['quantity']} ticket(s) · Order {r['serial']}\n"
         f"Pay by {r['expires_at'][11:16]} Singapore time. The QR sets this amount for you. Check the recipient in your banking app.\n\n"
         '<b>Your booking name must match the full name on the paying bank account.</b> '
-        f"If someone else pays, ask them to write {r['serial']} in the PayNow remarks and send "
-        f"/payer {r['serial']} FULL_BANK_SENDER_NAME here. No remarks option? Send /payer with their bank name anyway.\n\n"
-        'After paying, tap I have paid and please wait patiently for our team to approve the transaction. '
-        'We do not use AI to approve payments; a staff member checks each incoming bank credit before your tickets are sent. '
-        'Please do not pay twice while waiting.')
+        f"Someone else paying? Ask them to include {r['serial']} in the remarks, if available. Then send "
+        f"/payer {r['serial']} FULL_BANK_SENDER_NAME here.\n\n"
+        'After paying, tap I have paid and wait for staff approval. Our team checks the bank credit before sending tickets. Do not pay twice.'
+        +drink_note(json.loads(r['details'])))
     with payment_image(r['total_cents']) as f:
         await u.effective_chat.send_photo(photo=f,caption=caption,parse_mode='HTML',reply_markup=keys(('I have paid','paid:'+r['serial'])))
 async def click(u,c):
@@ -214,6 +223,11 @@ async def click(u,c):
         if key.startswith('admit:'):
             if await staff(u):await say(u,'ADMITTED — first entry recorded.' if ledger.admit(key[6:],user) else 'BLOCKED — ticket is already used, void or invalid.')
             return
+        if key.startswith('drink:'):
+            if await staff(u):
+                label=ledger.redeem_drink(key[6:],user)
+                await say(u,f'FREE DRINK REDEEMED — ticket #{label:03d}. Give this guest one drink. This action does not admit them to the event.')
+            return
         if key.startswith('pay:'):
             r=ledger.order(key[4:])
             return await payment(u,r) if r else await say(u,'Order unavailable.')
@@ -225,7 +239,7 @@ async def click(u,c):
         state,d=ledger.draft(user)
         if key=='begin':
             if not opened() or not offer():return await say(u,'Sales are closed.')
-            tier,price=offer();ledger.save(user,'name',dict(tier=tier,price=price))
+            tier,price=offer();ledger.save(user,'name',dict(tier=tier,price_cents=price*100))
             return await booking_question(u,'name')
         if key.startswith('back:'):
             if key[5:]!=state or state not in ('name','contact','source','promoter_code','quantity','confirm'):
@@ -242,25 +256,19 @@ async def click(u,c):
             current=offer()
             if not current or current[0]!=d['tier']:raise ValueError('The offer changed. Please start again with /buy.')
             d['source']=source
-            d['price']=current[1]
-            for field in ('promoter_code','discount_percent','quantity'):d.pop(field,None)
+            d['price_cents']=current[1]*100
+            for field in ('price','promoter_code','discount_percent','promotion','quantity'):d.pop(field,None)
             if source=='Promoter':
                 ledger.save(user,'promoter_code',d)
                 return await booking_question(u,'promoter_code')
             ledger.save(user,'quantity',d)
             return await booking_question(u,'quantity')
         if key.startswith('qty:') and state=='quantity' and key[4:].isdigit() and 1<=int(key[4:])<=10:
-            if d.get('promoter_code'):
-                promoter=ledger.promoter(d['promoter_code'])
-                if not promoter:raise ValueError('This promoter code is unavailable. Please start again with /buy.')
-                current=offer()
-                if not current or current[0]!=d['tier']:raise ValueError('The offer changed. Please start again with /buy.')
-                d['discount_percent']=promoter['discount_percent'] if ledger.promoter_discounts_enabled() else 0
-                d['price']=current[1]*(100-d['discount_percent'])//100
+            refresh_quote(d,offer())
             d['quantity']=int(key[4:]);ledger.save(user,'confirm',d)
             referral=f"\nPromoter: {d['promoter_code']}" if d.get('promoter_code') else ''
-            discount=(f"\nPromoter discount: 20% (S${d['price']} per ticket)" if d.get('discount_percent') else '\nPromoter discounts are paused; standard price applies.') if d.get('promoter_code') else ''
-            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}{discount}\nQuantity: {d['quantity']}\nTotal: S${d['price']*d['quantity']}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",confirmation_keys())
+            discount=f"\nPromoter discount: {d['discount_percent']}% (S${d['price_cents']/100:.2f} per ticket)" if d.get('discount_percent') else ''
+            return await say(u,f"Please confirm:\nName: {d['name']}\nContact: {d['contact']}\nSource: {d['source']}{referral}\nOffer: {d['tier']}{discount}\nQuantity: {d['quantity']}\nTotal: S${d['price_cents']*d['quantity']/100:.2f}{drink_note(d)}\n\nConfirm to reserve tickets for 30 minutes and receive payment instructions.",confirmation_keys())
         if key=='confirm' and state=='confirm':
             if not opened() or not offer():return await say(u,'Sales are closed.')
             r=ledger.create(user,offer());await q.edit_message_reply_markup(reply_markup=None)
@@ -282,16 +290,15 @@ async def answer(u,c):
     if state=='source':return await say(u,'Please choose one of these options:',source_keys())
     if state=='promoter_code':
         code=text.upper()
-        promoter=ledger.promoter(code)
-        if not promoter:return await say(u,'That code was not recognised. Check it with your promoter, or tap ← Back to choose another source.',back_keys(state))
+        if not code:return await booking_question(u,state)
         current=offer()
         if not current or current[0]!=d['tier']:return await say(u,'The offer changed. Please start again with /buy.')
-        d['promoter_code']=promoter['code']
-        d['discount_percent']=promoter['discount_percent'] if ledger.promoter_discounts_enabled() else 0
-        d['price']=current[1]*(100-d['discount_percent'])//100
+        try:quote=ledger.quote(code,current)
+        except ValueError as exc:return await say(u,str(exc),back_keys(state))
+        d.update(quote);d.pop('price',None)
         ledger.save(user,'quantity',d)
-        discount_note="20% off" if d['discount_percent'] else "Referral recorded. Discounts are temporarily paused"
-        return await say(u,f"Code accepted: {promoter['code']}. {discount_note} — S${d['price']} per ticket for this offer. How many tickets? Choose 1–10.",quantity_keys())
+        discount_note='10% off' if d['discount_percent'] else 'Free-drink request recorded; eligibility is confirmed on approval'
+        return await say(u,f"Code accepted: {d['promoter_code']}. {discount_note} — S${d['price_cents']/100:.2f} per ticket. How many tickets? Choose 1–10.",quantity_keys())
     if state=='quantity':return await say(u,'Please choose how many tickets (1–10) using a button:',quantity_keys())
     if state=='confirm':return await say(u,'Please use a button to confirm, go back, restart, or cancel:',confirmation_keys())
     await say(u,'Use /buy to book, /orders for your bookings, or /help for assistance.')
@@ -307,41 +314,46 @@ async def review(u,c):
 def render_ticket(t):
     link=f"https://t.me/{BOT_USERNAME}?start=check_{t['token']}"
     qr=qrcode.make(link).convert('RGB')
-    canvas=Image.new('RGB',(max(620,qr.width+80),qr.height+220),'white');canvas.paste(qr,((canvas.width-qr.width)//2,90))
+    canvas=Image.new('RGB',(max(620,qr.width+80),qr.height+255),'white');canvas.paste(qr,((canvas.width-qr.width)//2,90))
     dr=ImageDraw.Draw(canvas);font=ImageFont.load_default(size=22)
     dr.text((24,20),f"DND Nights | Ticket #{t['label']:03d}",font=font,fill='black')
     dr.text((24,qr.height+110),'28 November 2026 | One guest, one entry',font=ImageFont.load_default(size=19),fill='black')
     dr.text((24,qr.height+145),f"Order: {t['serial']}",font=ImageFont.load_default(size=18),fill='black')
     dr.text((24,qr.height+180),'Keep this QR private. Staff scan at entry.',font=ImageFont.load_default(size=18),fill='black')
+    if t['free_drink']:
+        text='Free drink: redeemed' if t['drink_claimed_at'] else 'Includes 1 free drink | redeem once with staff'
+        dr.text((24,qr.height+215),text,font=ImageFont.load_default(size=18),fill='black')
     buf=io.BytesIO();canvas.save(buf,'PNG');buf.seek(0);return buf
 async def deliver(bot,r,only_missing=False):
     if r['status']!='paid':return
     for t in ledger.tickets(r['serial']):
         if only_missing and t['delivered_at']:continue
-        await bot.send_photo(r['user_id'],photo=render_ticket(t),caption=f"Payment verified by event staff.\nTicket #{t['label']:03d}\nOrder: {r['serial']}\nOne guest per QR. /tickets resends this same ticket; it does not create another entry.")
+        drink=('\nFree drink already redeemed.' if t['drink_claimed_at'] else '\nIncludes ONE free drink. Show this QR to event staff to redeem once.') if t['free_drink'] else ''
+        if not t['free_drink'] and json.loads(r['details']).get('promotion')=='free_drink':drink='\nFree drink not included: this ticket was approved after the first 100.'
+        await bot.send_photo(r['user_id'],photo=render_ticket(t),caption=f"Payment verified by event staff.\nTicket #{t['label']:03d}\nOrder: {r['serial']}{drink}\nOne guest per QR. /tickets resends this same ticket; it does not create another entry.")
         ledger.delivered(t['token'])
 async def add_promoter_cmd(u,c):
     if not await staff(u):return
-    if len(c.args)<2:return await say(u,'Use /addpromoter NAME20 Promoter full name. Add the same code to the Promoters sheet.')
-    try:ledger.add_promoter(c.args[0],' '.join(c.args[1:]),u.effective_user.id)
+    if len(c.args)<2:return await say(u,'Use /addpromoter NAME Promoter full name. This creates NAMEFREE and NAME10.')
+    try:stem=ledger.add_promoter(c.args[0],' '.join(c.args[1:]),u.effective_user.id)
     except ValueError as exc:return await say(u,str(exc))
-    status='20% discounts are open.' if ledger.promoter_discounts_enabled() else 'Discounts are paused; the code is saved for reopening and can track referrals now.'
-    await say(u,f'Promoter code {c.args[0].upper()} saved. {status} Enter it in the Promoters sheet as well.')
+    await say(u,f'Promoter saved: {stem}FREE and {stem}10. FREE is valid before 100 approved tickets; 10% is active afterwards unless manually paused. Add these codes to the Promoters sheet as well.')
 async def promoter_discounts_cmd(u,c):
     if not await staff(u):return
     if len(c.args)!=1 or c.args[0].lower() not in ('on','off'):
         state='OPEN' if ledger.promoter_discounts_enabled() else 'PAUSED'
-        return await say(u,f'Promoter discounts: {state}. Use /promodiscounts on or /promodiscounts off. Existing orders keep their quoted price.')
+        return await say(u,f'10% promoter discounts: {state}. Use /promodiscounts on or /promodiscounts off. The 10% phase cannot begin before 100 approvals. Existing orders keep their quoted price.')
     enabled=c.args[0].lower()=='on'
     ledger.set_promoter_discounts(enabled,u.effective_user.id)
-    await say(u,'Promoter discounts are now '+('OPEN: valid codes give 20% off new bookings.' if enabled else 'PAUSED: new bookings use standard prices; referral tracking remains available.')+' Existing orders keep their quoted price.')
+    await say(u,('10% promoter discounts are enabled after the first 100 approved tickets.' if enabled else '10% promoter discounts are manually paused.')+' NAMEFREE still closes at 100 approvals. Existing orders keep their quoted price.')
 
 async def promoters_cmd(u,c):
     if not await staff(u):return
     stats=ledger.promoter_stats()
-    state='OPEN' if ledger.promoter_discounts_enabled() else 'PAUSED'
-    await say(u,f'Promoter discounts: {state}\nPromoter counts (ticket quantities):\n'+'\n'.join(
-        f"{p['name']} · {p['code']}: {p['booked']} booked, {p['paid']} paid, {p['checked_in']} checked in"
+    campaign=ledger.campaign()
+    state='FREE codes active' if campaign['free_open'] else ('10% codes active' if campaign['discount_open'] else '10% codes manually paused')
+    await say(u,f"Campaign: {state}\nApproved tickets: {campaign['approved']}/100\nFirst-100 places remaining: {campaign['remaining']}\nFree drinks awarded: {campaign['drinks_granted']}\nPromoter counts (ticket quantities):\n"+'\n'.join(
+        f"{p['name']} · {p['code']}FREE / {p['code']}10: {p['booked']} booked, {p['paid']} paid, {p['checked_in']} checked in"
         for p in stats))
 async def approve(u,c):
     if not await staff(u):return
@@ -355,7 +367,8 @@ async def approve(u,c):
         if not money.is_finite() or money<=0 or money*100!=(money*100).to_integral_value():raise ValueError('Invalid payment amount.')
         r=ledger.approve_matched(serial,sender,bank_date,int(money*100),u.effective_user.id)
     except (ValueError,InvalidOperation) as exc:return await say(u,str(exc))
-    await say(u,'Bank verification saved. Sending tickets.')
+    details=json.loads(r['details'])
+    await say(u,f"Bank verification saved. Sending {r['quantity']} tickets. Free drinks awarded: {details.get('free_drinks_awarded',0)}.\nApproved tickets total: {ledger.campaign()['approved']}."+ ('\nThe first-100 offer is closed. New bookings use the general price; NAME10 codes are now eligible unless manually paused.' if details.get('approval_position_start',101)<=100<=details.get('approval_position_end',0) else ''))
     try:await deliver(c.bot,r)
     except Exception:await say(u,'Approval saved but delivery failed. Automatic retry runs every minute. /resend ORDER retries the same tickets.')
 async def payer_cmd(u,c):
@@ -380,9 +393,14 @@ async def check_token(u,token):
     if not await staff(u):return
     r=ledger.lookup(token)
     if not r or r['status']!='paid':return await say(u,'INVALID — not a paid active ticket.')
-    if r['used_at']:return await say(u,f"ALREADY USED — #{r['label']:03d}\nFirst entry: {r['used_at']}")
     d=json.loads(r['details'])
-    await say(u,f"VALID — Ticket #{r['label']:03d}\nBooker: {d['name']}\nOrder: {r['serial']}\nTap below to admit one guest.",keys(('Admit guest','admit:'+token)))
+    entry=f"ALREADY USED — #{r['label']:03d}\nFirst entry: {r['used_at']}" if r['used_at'] else f"VALID — Ticket #{r['label']:03d}"
+    buttons=[] if r['used_at'] else [('Admit guest','admit:'+token)]
+    drink='No free drink attached.'
+    if r['free_drink']:
+        drink='Free drink: ALREADY REDEEMED.' if r['drink_claimed_at'] else 'Free drink: AVAILABLE. Redeem only when serving it.'
+        if not r['drink_claimed_at']:buttons.append(('Redeem free drink','drink:'+token))
+    await say(u,f"{entry}\nBooker: {d['name']}\nOrder: {r['serial']}\n{drink}",keys(*buttons) if buttons else None)
 async def check(u,c):
     if not c.args:
         if await staff(u):await say(u,'Scan a guest QR with your phone camera, open its Telegram link and press Start. Or /check TOKEN.')
@@ -482,6 +500,8 @@ async def setup(app):
     app.bot_data['door_bridge']=bridge
     app.bot_data['door_task']=asyncio.create_task(bridge.run())
     print(f'Connected @{BOT_USERNAME}; live ledger; sales {"OPEN" if opened() else "CLOSED"}; capacity {ledger.capacity}.',flush=True)
+    campaign=ledger.campaign()
+    print(f"Promoter campaign: {campaign['approved']} approved tickets; FREE {'OPEN' if campaign['free_open'] else 'CLOSED'}; 10% {'OPEN' if campaign['discount_open'] else 'CLOSED'}; {campaign['drinks_granted']} drinks awarded.",flush=True)
 async def shutdown(app):
     door_task=app.bot_data.get('door_task')
     if door_task:
@@ -512,4 +532,5 @@ if __name__=='__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,answer))
     app.add_error_handler(error)
     app.run_polling(allowed_updates=['message','callback_query'],drop_pending_updates=False)
+
 

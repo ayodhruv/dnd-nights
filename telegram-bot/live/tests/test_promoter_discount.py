@@ -1,4 +1,4 @@
-"""Confirmed promoter discounts on new bookings, including migration of the live schema."""
+"""Campaign codes and exact pricing, including the old three-column schema migration."""
 import json
 import sqlite3
 import sys
@@ -32,17 +32,21 @@ with tempfile.TemporaryDirectory() as tmp:
         db.execute("INSERT INTO promoters VALUES('DND-ADEEP','Adeep','2026-10-20')")
     ledger=Ledger(path)
     assert ledger.promoter('DND-ADEEP') is None
-    for code in ('ADEEP20','NIRBHAY20','ISHWAR20','SHALU20','AUSTIN20','AIRA20'):
-        assert ledger.promoter(code.lower())['discount_percent']==20
-    for user,offer,price in ((1,('Early bird',25),20),(2,('Presale',30),24),(3,('Walk-in',35),28)):
-        order=booking(ledger,user,offer,'adeep20',price)
+    for stem in ('ADEEP','NIRBHAY','ISHWAR','SHALU','AUSTIN','AIRA','NIHEELA','SACHIN'):
+        assert ledger.promoter((stem+'free').lower())['discount_percent']==0
+        assert ledger.promoter((stem+'10').lower())['discount_percent']==10
+        assert ledger.promoter(stem+'20') is None
+    for user,offer,price in ((1,('Early bird',25),25),(2,('Walk-in',35),35)):
+        order=booking(ledger,user,offer,'adeepfree',price)
         assert order['total_cents']==price*2*100
-        assert json.loads(order['details'])['promoter_code']=='ADEEP20'
+        assert json.loads(order['details'])['promoter_code']=='ADEEPFREE'
     assert booking(ledger,4,('Early bird',25))['total_cents']==5000
     blocked(lambda:booking(ledger,5,('Early bird',25),'DND-ADEEP',20))
     blocked(lambda:booking(ledger,6,('Early bird',25),'ADEEP20',25))
     blocked(lambda:booking(ledger,7,('Early bird',25),unit_price=20))
+    blocked(lambda:booking(ledger,8,('Early bird',25),'ADEEP10',22.5))
     with ledger.db() as db:
         assert db.execute("SELECT name FROM promoters WHERE code='DND-ADEEP'").fetchone()[0]=='Adeep'
     assert ledger.promoter_stats()
-print('PASS: confirmed codes, case-insensitive 20% pricing across offers, exact totals, legacy migration, invalid-code and price guards.')
+print('PASS: FREE/10 codes, case-insensitive exact pricing, legacy migration, inactive-code and price guards. Full threshold tests: python -m unittest -v test_campaign.py')
+

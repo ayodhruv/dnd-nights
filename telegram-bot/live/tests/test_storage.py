@@ -66,13 +66,13 @@ with tempfile.TemporaryDirectory() as d:
  else:raise AssertionError('double approval')
  # A promoter booking uses ten seats, is attributed only when paid, and can be scanned once per ticket.
  l4=Ledger(d+'/promoter.db',capacity=10)
- assert l4.promoter('adeep20')['name']=='Adeep'
- l4.save(1,'confirm',{**D,'source':'Promoter','promoter_code':'ADEEP20','price':20,'quantity':10})
- c=l4.create(1,('Early bird',25));assert len(l4.tickets(c['serial']))==10 and c['total_cents']==20000
+ assert l4.promoter('adeepfree')['name']=='Adeep'
+ l4.save(1,'confirm',{**D,'source':'Promoter','promoter_code':'ADEEPFREE','price':25,'quantity':10})
+ c=l4.create(1,('Early bird',25));assert len(l4.tickets(c['serial']))==10 and c['total_cents']==25000
  assert l4.promoter_stats()[0]['paid']==0
- l4.submit(c['serial'],1);l4.approve(c['serial'],'BANK-TEN',20000,99)
+ l4.submit(c['serial'],1);l4.approve(c['serial'],'BANK-TEN',25000,99)
  t=l4.tickets(c['serial'])[0];assert l4.admit(t['token'],99) and not l4.admit(t['token'],99)
- adeep=next(p for p in l4.promoter_stats() if p['code']=='ADEEP20')
+ adeep=next(p for p in l4.promoter_stats() if p['code']=='ADEEP')
  assert (adeep['booked'],adeep['paid'],adeep['checked_in'])==(10,10,1)
  l5=Ledger(d+'/invalid-promoter.db',capacity=10)
  l5.save(2,'confirm',{**D,'source':'Promoter','promoter_code':'UNKNOWN','quantity':2})
@@ -80,3 +80,4 @@ with tempfile.TemporaryDirectory() as d:
  except ValueError:pass
  else:raise AssertionError('unknown promoter accepted')
  print('PASS: owner checks, amount/ref guards, case-normalised duplicate reference rollback, paid-only admission, concurrent once-only entry, void, backup restore, concurrent capacity, expiry/late capacity, repeated approval blocked.')
+

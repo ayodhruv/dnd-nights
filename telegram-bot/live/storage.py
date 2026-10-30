@@ -7,6 +7,7 @@ import sqlite3
 import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo('Asia/Singapore')
@@ -18,10 +19,17 @@ def bank_name(value):
     return name
 def name_key(value):return bank_name(value).casefold()
 
+PROMOTERS=(('ADEEP','Adeep'),('NIRBHAY','Nirbhay'),('ISHWAR','Ishwar'),
+           ('SHALU','Shalu'),('AUSTIN','Austin'),('AIRA','Ira'),
+           ('JESWANT','Jeswant'),('AESHA','Aesha'),('MEERA','Meera'),
+           ('HREHAN','Hrehan'),('DHRUV','Dhruv'),('NIHEELA','Niheela'),('SACHIN','Sachin'))
+PROMO_LIMIT=100
+
 class Ledger:
     def __init__(self, path, capacity=230, event_id='DND26', hold_minutes=30):
         self.path, self.capacity, self.event_id, self.hold_minutes = str(path), capacity, event_id, hold_minutes
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._backup_before_campaign()
         with self.db() as db:
             db.executescript('''
               CREATE TABLE IF NOT EXISTS door_requests(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,result TEXT NOT NULL);
@@ -41,6 +49,9 @@ class Ledger:
               CREATE TABLE IF NOT EXISTS payments(
                 reference TEXT PRIMARY KEY,serial TEXT NOT NULL UNIQUE REFERENCES orders(serial),
                 amount_cents INTEGER NOT NULL,admin_id INTEGER NOT NULL,created_at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS drink_benefits(
+                token TEXT PRIMARY KEY REFERENCES tickets(token),granted_at TEXT NOT NULL,
+                claimed_at TEXT,claimed_by INTEGER);
               CREATE TABLE IF NOT EXISTS payment_evidence(
                 serial TEXT PRIMARY KEY REFERENCES orders(serial),sender_name TEXT NOT NULL,
                 bank_date TEXT NOT NULL,match_key TEXT NOT NULL UNIQUE);
@@ -58,14 +69,26 @@ class Ledger:
             # Older codes remain in the ledger for historical orders, but cannot start new discounted bookings.
             for code,name in (('DND-ADEEP','Adeep'),('DND-NIRBHAY','Nirbhay')):
                 db.execute('INSERT OR IGNORE INTO promoters(code,name,created_at) VALUES(?,?,?)',(code,name,now().isoformat()))
-            # Confirmed NAME20 codes from the DND Promoters sheet.
-            for code,name in (('ADEEP20','Adeep'),('NIRBHAY20','Nirbhay'),('ISHWAR20','Ishwar'),
-                              ('SHALU20','Shalu'),('AUSTIN20','Austin'),('AIRA20','Ira'),
-                              ('JESWANT20','Jeswant'),('AESHA20','Aesha'),('MEERA20','Meera'),
-                              ('HREHAN20','Hrehan'),('DHRUV20','Dhruv')):
-                db.execute('INSERT INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,20) '
-                           'ON CONFLICT(code) DO UPDATE SET name=excluded.name,discount_percent=20',
-                           (code,name,now().isoformat()))
+            # Keep historical NAME20 rows and orders; only FREE/10 codes accept new bookings.
+            for stem,name in PROMOTERS:
+                for suffix,discount in (('FREE',0),('10',10)):
+                    db.execute('INSERT OR IGNORE INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,?)',
+                               (stem+suffix,name,now().isoformat(),discount))
+            if not db.execute("SELECT 1 FROM meta WHERE key='promo_campaign_v1'").fetchone():
+                db.execute("INSERT INTO meta VALUES('promo_campaign_v1',?)",(now().isoformat(),))
+                db.execute("UPDATE meta SET value='true' WHERE key='promoter_discounts_enabled'")
+                self.audit(db,None,'promoter_campaign_launched',0,'First 100 approved tickets; NAMEFREE then NAME10')
+    def _backup_before_campaign(self):
+        path=Path(self.path)
+        if not path.exists():return
+        with sqlite3.connect(self.path) as source:
+            try:launched=source.execute("SELECT 1 FROM meta WHERE key='promo_campaign_v1'").fetchone()
+            except sqlite3.OperationalError:launched=None
+            if launched:return
+            folder=path.parent/'backups';folder.mkdir(exist_ok=True,mode=0o700)
+            target=folder/f'pre-promoter-launch-{now():%Y%m%d-%H%M%S-%f}.sqlite3'
+            with sqlite3.connect(target) as backup:source.backup(backup)
+            target.chmod(0o600)
     def db(self):
         db=sqlite3.connect(self.path,timeout=20)
         db.row_factory=sqlite3.Row
@@ -83,6 +106,48 @@ class Ledger:
         with self.db() as db:db.execute('INSERT OR REPLACE INTO drafts VALUES(?,?,?)',(user,state,json.dumps(data)))
     def clear(self,user):
         with self.db() as db:db.execute('DELETE FROM drafts WHERE user_id=?',(user,))
+    @staticmethod
+    def _approved_count(db):
+        # Payment rows survive voids, so a used-up promotion cannot reopen after a cancellation.
+        return db.execute('SELECT COALESCE(SUM(o.quantity),0) FROM orders o JOIN payments p USING(serial)').fetchone()[0]
+    def campaign(self):
+        with self.db() as db:
+            count=self._approved_count(db)
+            return dict(approved=count,remaining=max(0,PROMO_LIMIT-count),free_open=count<PROMO_LIMIT,
+                        discount_open=count>=PROMO_LIMIT and self._promoter_discounts_enabled(db),
+                        drinks_granted=db.execute('SELECT COUNT(*) FROM drink_benefits').fetchone()[0])
+    def sales_offer(self,today,event):
+        if today>event:return None
+        if today==event:return 'Walk-in',35
+        with self.db() as db:
+            return ('Early bird',25) if self._approved_count(db)<PROMO_LIMIT else ('General',30)
+    @staticmethod
+    def _promoter(db,code):
+        code=code.strip().upper()
+        r=db.execute('SELECT * FROM promoters WHERE code=?',(code,)).fetchone()
+        if not r or not ((code.endswith('FREE') and r['discount_percent']==0) or
+                         (code.endswith('10') and r['discount_percent']==10)):return None
+        return r
+    def _quote(self,db,code,expected_offer):
+        tier,base=expected_offer
+        count=self._approved_count(db)
+        if tier=='Early bird' and count>=PROMO_LIMIT:
+            raise ValueError('Early bird has ended. New bookings are at the general price. Please restart with /buy; existing orders keep their quoted total.')
+        result=dict(price_cents=base*100,discount_percent=0,promotion=None)
+        if not code:return result
+        p=self._promoter(db,code)
+        if not p:raise ValueError('That referral code is not recognised. Check with your promoter, or tap ← Back to choose another source. Old NAME20 codes are no longer valid for new bookings.')
+        if p['code'].endswith('FREE'):
+            if count>=PROMO_LIMIT:raise ValueError('The first-100 free-drink offer has ended. Ask your promoter about current offers, or tap ← Back to choose another source.')
+            result['promotion']='free_drink'
+        else:
+            if count<PROMO_LIMIT or not self._promoter_discounts_enabled(db):
+                raise ValueError('This code is not active yet. Check with your promoter, or tap ← Back to choose another source.')
+            result.update(discount_percent=10,price_cents=base*90,promotion='discount')
+        result['promoter_code']=p['code']
+        return result
+    def quote(self,code,expected_offer):
+        with self.db() as db:return self._quote(db,code,expected_offer)
     def create(self,user,expected_offer):
         t=now(); day=t.strftime('%Y-%m-%d')
         with self.db() as db:
@@ -93,18 +158,16 @@ class Ledger:
             tier,base_price=expected_offer
             if d['tier']!=tier:raise ValueError('The offer changed. Please start again with /buy.')
             if type(qty) is not int or not 1<=qty<=10:raise ValueError('Choose 1 to 10 tickets.')
-            expected_price=base_price
             if d.get('source')=='Promoter':
-                code=d.get('promoter_code','').strip().upper()
-                promoter=db.execute('SELECT discount_percent FROM promoters WHERE code=? AND discount_percent=20',(code,)).fetchone()
-                if not promoter:raise ValueError('This code is not a confirmed promoter code. Ask your promoter for a NAME20 code and start again with /buy.')
-                discount=promoter['discount_percent'] if self._promoter_discounts_enabled(db) else 0
-                expected_price=base_price*(100-discount)//100
-                d['discount_percent']=discount
-                d['promoter_code']=code
+                if not d.get('promoter_code'):raise ValueError('Enter a valid promoter code or go back and choose another source.')
             elif d.get('promoter_code'):
                 raise ValueError('Please start again with /buy to choose your referral source.')
-            if d['price']!=expected_price:raise ValueError('The ticket price changed. Please start again with /buy.')
+            quote=self._quote(db,d.get('promoter_code'),expected_offer)
+            # Accept an in-progress legacy draft only when its price still matches today's rules.
+            quoted_cents=d.get('price_cents')
+            if quoted_cents is None:quoted_cents=int(Decimal(str(d.get('price',0)))*100)
+            if quoted_cents!=quote['price_cents']:raise ValueError('The ticket price changed. Please start again with /buy.')
+            d.update(quote);d.pop('price',None)
             active=db.execute("SELECT serial FROM orders WHERE user_id=? AND status IN ('pending','review','review_late')",(user,)).fetchone()
             if active:raise ValueError('You already have an unpaid booking. Use /orders or /help.')
             occupied=db.execute("SELECT COALESCE(SUM(quantity),0) FROM orders WHERE status IN ('pending','review','paid')").fetchone()[0]
@@ -116,7 +179,7 @@ class Ledger:
             seq=db.execute('SELECT COALESCE(MAX(seq),0)+1 FROM orders WHERE day=?',(day,)).fetchone()[0]
             if seq>999:raise ValueError('Daily booking limit reached. Contact /help.')
             serial=f'{self.event_id}-{t:%d%m}{seq:03d}{labels[0]:03d}'
-            db.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)',(serial,user,day,seq,json.dumps(d),qty,expected_price*qty*100,'pending',t.isoformat(),(t+timedelta(minutes=self.hold_minutes)).isoformat()))
+            db.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)',(serial,user,day,seq,json.dumps(d),qty,quote['price_cents']*qty,'pending',t.isoformat(),(t+timedelta(minutes=self.hold_minutes)).isoformat()))
             for label in labels:db.execute('INSERT INTO tickets(token,serial,label) VALUES(?,?,?)',(secrets.token_urlsafe(32),serial,label))
             self.audit(db,serial,'created',user)
             db.execute('DELETE FROM drafts WHERE user_id=?',(user,))
@@ -130,7 +193,7 @@ class Ledger:
             self.expire(db)
             return db.execute('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC',(user,)).fetchall()
     def tickets(self,serial):
-        with self.db() as db:return db.execute('SELECT * FROM tickets WHERE serial=? ORDER BY label',(serial,)).fetchall()
+        with self.db() as db:return db.execute('SELECT t.*,b.token IS NOT NULL AS free_drink,b.claimed_at AS drink_claimed_at FROM tickets t LEFT JOIN drink_benefits b USING(token) WHERE serial=? ORDER BY label',(serial,)).fetchall()
     def submit(self,serial,user):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE');self.expire(db)
@@ -176,12 +239,22 @@ class Ledger:
                     raise ValueError('Sender name differs from the declared payer. Ask the guest to send /payer ORDER FULL_BANK_NAME, then verify in UOB again.')
             occupied=db.execute("SELECT COALESCE(SUM(quantity),0) FROM orders WHERE status IN ('pending','review','paid') AND serial<>?",(serial,)).fetchone()[0]
             if occupied+r['quantity']>self.capacity:raise ValueError('Capacity reached. Do not issue a ticket; resolve this payment with the guest.')
+            approved_before=self._approved_count(db)
             try:db.execute('INSERT INTO payments VALUES(?,?,?,?,?)',(ref,serial,amount,admin,now().isoformat()))
             except sqlite3.IntegrityError:
                 raise ValueError('This payer, amount and bank date were already matched to another order. Check for a distinct second credit in UOB; do not approve this one yet.') from None
             if evidence:
                 db.execute('INSERT INTO payment_evidence(serial,sender_name,bank_date,match_key) VALUES(?,?,?,?)',(serial,*evidence))
-            db.execute("UPDATE orders SET status='paid' WHERE serial=?",(serial,));self.audit(db,serial,'bank_verified',admin,ref)
+            details=json.loads(r['details'])
+            drinks=min(r['quantity'],max(0,PROMO_LIMIT-approved_before)) if details.get('promotion')=='free_drink' else 0
+            if drinks:
+                tokens=db.execute('SELECT token FROM tickets WHERE serial=? ORDER BY label LIMIT ?',(serial,drinks)).fetchall()
+                for t in tokens:db.execute('INSERT INTO drink_benefits(token,granted_at) VALUES(?,?)',(t['token'],now().isoformat()))
+            details.update(approval_position_start=approved_before+1,approval_position_end=approved_before+r['quantity'],free_drinks_awarded=drinks)
+            db.execute("UPDATE orders SET status='paid',details=? WHERE serial=?",(json.dumps(details),serial))
+            self.audit(db,serial,'bank_verified',admin,ref)
+            if approved_before<PROMO_LIMIT<=approved_before+r['quantity']:
+                self.audit(db,serial,'first_100_closed',admin,'General price active; NAMEFREE closed; NAME10 enabled unless manually paused')
         return self.order(serial)
     def reject(self,serial,admin,note):
         with self.db() as db:
@@ -199,7 +272,16 @@ class Ledger:
             db.execute("UPDATE orders SET status='void' WHERE serial=?",(serial,));self.audit(db,serial,'voided',admin,note)
             return r
     def lookup(self,token):
-        with self.db() as db:return db.execute('SELECT tickets.*,orders.details,orders.status FROM tickets JOIN orders USING(serial) WHERE token=?',(token,)).fetchone()
+        with self.db() as db:return db.execute('SELECT t.*,o.details,o.status,b.token IS NOT NULL AS free_drink,b.claimed_at AS drink_claimed_at FROM tickets t JOIN orders o USING(serial) LEFT JOIN drink_benefits b USING(token) WHERE token=?',(token,)).fetchone()
+    def redeem_drink(self,token,admin):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            r=db.execute('SELECT t.serial,t.label,o.status,b.claimed_at FROM tickets t JOIN orders o USING(serial) JOIN drink_benefits b USING(token) WHERE token=?',(token,)).fetchone()
+            if not r or r['status']!='paid':raise ValueError('No active free drink is attached to this ticket.')
+            if r['claimed_at']:raise ValueError('This free drink has already been redeemed.')
+            db.execute('UPDATE drink_benefits SET claimed_at=?,claimed_by=? WHERE token=? AND claimed_at IS NULL',(now().isoformat(),admin,token))
+            self.audit(db,r['serial'],'drink_redeemed',admin,f"Ticket #{r['label']:03d}")
+            return r['label']
     def admit(self,token,admin):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -224,7 +306,7 @@ class Ledger:
         row=db.execute("SELECT value FROM meta WHERE key='promoter_discounts_enabled'").fetchone()
         return bool(row and row[0]=='true')
     def promoter_discounts_enabled(self):
-        with self.db() as db:return self._promoter_discounts_enabled(db)
+        return self.campaign()['discount_open']
     def set_promoter_discounts(self,enabled,admin):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -232,22 +314,28 @@ class Ledger:
                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",('true' if enabled else 'false',))
             self.audit(db,None,'promoter_discounts_on' if enabled else 'promoter_discounts_off',admin)
     def promoter(self,code):
-        with self.db() as db:return db.execute('SELECT * FROM promoters WHERE code=? AND discount_percent=20',(code.strip().upper(),)).fetchone()
+        with self.db() as db:return self._promoter(db,code)
     def add_promoter(self,code,name,admin):
         code=code.strip().upper();name=name.strip()
-        if not re.fullmatch(r'[A-Z][A-Z0-9-]{1,30}20',code) or not 2<=len(name)<=80:
-            raise ValueError('Use /addpromoter NAME20 Promoter full name; add the same code to the Promoters sheet.')
+        stem=code[:-4] if code.endswith('FREE') else code[:-2] if code.endswith('10') else code
+        if not re.fullmatch(r'[A-Z][A-Z0-9-]{1,26}',stem) or stem.endswith('20') or not 2<=len(name)<=80:
+            raise ValueError('Use /addpromoter NAME Promoter full name. This creates NAMEFREE and NAME10.')
         with self.db() as db:
-            try:db.execute('INSERT INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,20)',(code,name,now().isoformat()))
-            except sqlite3.IntegrityError:raise ValueError('That promoter code already exists.') from None
-            self.audit(db,None,'promoter_added',admin,code)
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM promoters WHERE code IN (?,?)',(stem+'FREE',stem+'10')).fetchone():
+                raise ValueError('That promoter already has campaign codes.')
+            for suffix,discount in (('FREE',0),('10',10)):
+                db.execute('INSERT INTO promoters(code,name,created_at,discount_percent) VALUES(?,?,?,?)',(stem+suffix,name,now().isoformat(),discount))
+            self.audit(db,None,'promoter_added',admin,stem)
+        return stem
     def promoter_stats(self):
         with self.db() as db:
-            promoters=[dict(r) for r in db.execute('SELECT code,name FROM promoters ORDER BY name')]
+            promoters=[dict(code=r['code'][:-4],name=r['name']) for r in db.execute("SELECT code,name FROM promoters WHERE code LIKE '%FREE' ORDER BY name")]
             for p in promoters:p.update(booked=0,paid=0,checked_in=0)
             index={p['code']:p for p in promoters}
             for r in db.execute("SELECT details,quantity,status,serial FROM orders WHERE status IN ('pending','review','review_late','paid')"):
                 code=json.loads(r['details']).get('promoter_code','')
+                code=code[:-4] if code.endswith('FREE') else code[:-2] if code.endswith(('10','20')) else code.removeprefix('DND-')
                 if code not in index:continue
                 index[code]['booked']+=r['quantity']
                 if r['status']=='paid':
@@ -306,3 +394,4 @@ class Ledger:
                  'serial':r['serial'],'payment_status':r['status'],
                  'entry_status':'Used' if r['used_at'] else ('Ready' if r['status']=='paid' else 'Not valid'),
                  'used_at':r['used_at'],'used_by':r['used_by']} for r in rows]}
+

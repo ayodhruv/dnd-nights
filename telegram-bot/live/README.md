@@ -2,12 +2,12 @@
 
 Public Telegram bookings with PayNow and **manual verification in the receiving bank account**. No TEST_USER_IDS setting. This version is separate from the earlier prototype; start `app.py`, not the parent `bot.py`.
 
-Confirmed configuration: event 28 November 2026, early bird S$25 through 14 November inclusive (Singapore), presale S$30, event-day walk-in S$35, maximum 230 tickets. One to ten tickets per order. This code handles this single event. Price values are defined in `offer()`; changing price env vars alone does not change them.
+Confirmed configuration: event 28 November 2026, early bird S$25 until 100 tickets have been approved across all sources, then General S$30; event-day walk-in S$35, maximum 230 tickets. One to ten tickets per order. The approval limit replaces the old calendar-based early-bird cutoff. See [PROMOTIONS.md](PROMOTIONS.md) for campaign rules and codes. Price values are defined in the ledger's `sales_offer()`; changing price env vars alone does not change them.
 
 ## What is ready
 
 - Guest Q&A with menu pages for date/location, prices and terms. PayNow QRs are sent as Telegram photos with the exact total prefilled; the guest's name should match the bank sender. If someone else pays, ask for the order serial in remarks where supported and record the actual sender with `/payer ORDER FULL_BANK_SENDER_NAME`; a missing remark does not prevent manual review.
-- Guests selecting Promoter must enter a confirmed code, case insensitive: ADEEP20, NIRBHAY20, ISHWAR20, SHALU20, AUSTIN20, or AIRA20. The code takes 20% off each ticket: early bird S$20, presale S$24, walk-in S$28. The bot calculates the full order amount and makes a fixed amount PayNow QR; no separate UOB images are needed. The earlier DND-ADEEP and DND-NIRBHAY entries remain in the database for historical attribution but cannot be used for new bookings. Admin `/promoters` reports booked, paid, and checked-in ticket quantities. `/addpromoter NAME20 Name` activates a new 20% code in the bot; staff must also put it in the Promoters sheet. There is no live Google Sheets sync.
+- Guests selecting Promoter enter a confirmed code, case insensitive, or use Back to choose another source. `NAMEFREE` requests one free drink for each eligible ticket among the first 100 approvals; it does not discount admission. At 100 approved tickets it closes, General S$30 activates for new bookings, and `NAME10` gives 10% off (S$27 General; S$31.50 walk-in). The later discount is not advertised in public menus. Existing orders keep their quoted total; group bookings crossing 100 only receive drinks for their eligible tickets. Old NAME20 codes remain historical and cannot start new bookings. `/promoters` reports phase, approval/drink counts and promoter attribution. `/addpromoter NAME Name` creates both code variants. There is no live Google Sheets sync.
 - One active unpaid booking per Telegram user, 30-minute unpaid holds, atomic capacity enforcement. Submitted payments hold capacity for review. Expired payments can be reported and are explicitly reviewed against remaining capacity.
 - Staff approve only after checking the actual incoming UOB credit against the declared bank sender, amount and bank date. The receiving list showed no transaction ID, so the bot stores a clearly labelled internal match key instead of pretending one exists. The same sender, amount and bank date cannot approve two orders automatically; staff must separately resolve a genuine second identical credit. Screenshots and claims alone are insufficient.
 - One secret QR per guest; ticket labels are unique. Public order IDs include `DND26-` followed by DDMM + daily sequence + first label. Labels are not the QR secret.
@@ -54,10 +54,12 @@ Automatic deploys are off: later GitHub pushes need a deliberate Render deploy. 
 - `/void ORDER reason`: invalidate an unadmitted paid booking. Does not refund money. Bookings with admitted guests cannot be voided to release capacity.
 - `/resend ORDER`: send the same paid QRs again.
 - `/check TOKEN`, or scan the ticket's Telegram link: verify paid/active/unused, then explicit Admit.
+- On that same Telegram check, a full admin can tap **Redeem free drink** when serving an awarded drink. Redemption and admission are separate one-time actions. The web door scanner still performs admission only.
+- `/promoters`: campaign phase, approved ticket count, awarded drinks and promoter statistics. `/promodiscounts on|off` controls the later 10% phase without bypassing the 100-approval threshold.
 - `/reply TELEGRAM_USER_ID message`: respond to a guest who booked or used /help.
 - `/backup`: private database copy containing contact details and ticket secrets; never commit it.
 
-Guests use `/help ORDER question`. Support messages go to staff through the bot; delivery requires staff to have started the bot first. Check /review regularly even if a notification fails.
+Guests use `/help` for a link to message an admin on Telegram. Check /review regularly even if a payment notification fails.
 
 ## Payment limitations
 
@@ -81,4 +83,5 @@ SQLite remains the ticket authority. The Site temporarily holds authenticated re
 
 The bot stores each scanner result transactionally with entry so a response lost during a connection interruption can be recovered with the same request ID. Concurrent scans can admit a ticket only once. Expired queued scans cannot cause delayed admissions. No offline admissions, automatic refunds, payment approvals, or drink redemptions are added by the scanner.
 
-Tests: `python tests/test_storage.py`, `python tests/test_payment_match.py`, and `python tests/test_door.py` (temporary fictional ledgers only).
+Tests: `python tests/test_storage.py`, `python tests/test_payment_match.py`, `python tests/test_door.py`, `python tests/test_promoter_discount.py`, and `python -m unittest -v test_campaign.py` (temporary fictional ledgers and fake Telegram transports only).
+
