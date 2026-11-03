@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DND Nights | Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#090909;--panel:#151514;--line:#302b1f;--gold:#d7b66c;--muted:#928c7e;--txt:#f1eee7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:14px system-ui,-apple-system,Segoe UI,sans-serif}
+button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}
+.layout{min-height:100vh;display:grid;grid-template-columns:210px 1fr}aside{border-right:1px solid var(--line);padding:28px 14px;background:#10100f}
+.logo{font-size:23px;font-weight:850;letter-spacing:3px;padding:5px 14px;color:var(--gold)}
+.sublogo{color:var(--muted);font-size:10px;letter-spacing:2px;padding:0 14px 32px}
+.nav{display:block;width:100%;color:#b9b6ae;padding:13px;border:0;background:transparent;text-align:left;border-radius:9px;margin:4px 0}
+.nav.active{background:#2e271a;color:var(--gold)}main{min-width:0;padding:32px;max-width:1500px;width:100%;margin:auto}
+.top{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:30px}.eyebrow{color:var(--gold);letter-spacing:2px;font-size:10px}
+h1{font-size:27px;margin:7px 0}h2{font-size:17px;margin:0 0 18px}.muted{color:var(--muted)}.small{font-size:12px}
+.btn{border:1px solid #66532b;border-radius:8px;background:#262113;color:var(--gold);padding:10px 15px}
+.btn.primary{color:#14110b;background:var(--gold);font-weight:700}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}
+.card{background:var(--panel);border:1px solid var(--line);padding:20px;border-radius:12px}.metric{font-size:30px;margin:10px 0;font-weight:700}
+.two{display:grid;grid-template-columns:1.2fr 1fr;gap:14px;margin-top:14px}.bar{height:9px;background:#312e27;border-radius:12px;overflow:hidden;margin:13px 0}.fill{height:100%;background:var(--gold)}
+.activity{display:flex;gap:10px;border-bottom:1px solid #2f2d28;padding:12px 0}.dot{height:7px;width:7px;border-radius:50%;background:var(--gold);margin-top:6px;flex:none}
+table{border-collapse:collapse;width:100%;font-size:12px}th,td{text-align:left;padding:14px 10px;border-bottom:1px solid #2d2b26;white-space:nowrap}th{color:var(--muted);font-weight:500}
+.tablewrap{overflow:auto}.toolbar{display:flex;gap:8px;margin-bottom:13px;flex-wrap:wrap}
+input,select{background:#11110f;border:1px solid #504733;color:var(--txt);border-radius:8px;padding:11px;min-width:0}
+input{flex:1}.status{display:inline-block;padding:5px 10px;background:#373123;border-radius:30px;color:#dfbe78}
+.hidden{display:none!important}.center{min-height:88vh;display:flex;justify-content:center;align-items:center;padding:20px}
+.login{max-width:420px;width:100%;text-align:center;padding:48px 26px}.login .logo{font-size:32px;padding:0}
+#login-widget{display:flex;justify-content:center;margin:30px 0 15px}#banner{padding:12px 18px;border:1px solid #75552a;background:#342515;margin:0 0 15px;border-radius:8px;white-space:pre-wrap}
+#video{width:100%;max-width:570px;background:#000;aspect-ratio:4/3;border-radius:10px;object-fit:cover}
+.scanresult{padding:18px;border:1px solid var(--line);border-radius:10px;margin-top:12px;white-space:pre-wrap}
+.footer{color:#777267;font-size:11px;margin-top:30px}
+@media(max-width:850px){.layout{grid-template-columns:62px 1fr}aside{padding:18px 5px}.logo{font-size:12px;letter-spacing:0;text-align:center;padding:0}.sublogo{display:none}.nav{text-align:center;font-size:11px;padding:11px 2px}.nav span{display:none}main{padding:17px}.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.top{align-items:flex-start}h1{font-size:23px}}
+</style></head><body>
+<div id="login" class="center"><div class="card login"><div class="logo">DND NIGHTS</div><p class="eyebrow">ADMIN PORTAL</p><h2>Secure staff access</h2><p class="muted small">Sign in with an approved Telegram account.</p><div id="login-widget"></div><p class="muted small">Staff accounts are identified by numeric Telegram ID.</p></div></div>
+<div id="shell" class="layout hidden">
+<aside><div class="logo">DND<span style="color:white">.</span></div><div class="sublogo">NIGHTS / ADMIN</div>
+<button class="nav active" data-page="overview">◫ <span>Overview</span></button>
+<button class="nav" data-page="orders">▤ <span>Orders & Guests</span></button>
+<button class="nav" data-page="scanner">▣ <span>QR Scanner</span></button>
+<button class="nav" data-page="payments">◈ <span>Payments</span></button>
+</aside>
+<main><div class="top"><div><div class="eyebrow">DEEPAVALI AFTERGLOW 2026</div><h1 id="title">Overview</h1><div class="muted small">Live ledger view · Singapore</div></div><div><div id="who" class="small muted"></div><button class="btn" id="logout">Sign out</button></div></div>
+<div id="banner" class="hidden"></div>
+<section id="overview">
+<div class="grid"><div class="card"><div class="muted small">Tickets sold</div><div class="metric" id="sold">—</div><div class="muted small" id="capacity"></div></div>
+<div class="card"><div class="muted small">Gross paid revenue</div><div class="metric" id="revenue">—</div><div class="muted small">Recorded paid orders</div></div>
+<div class="card"><div class="muted small">Awaiting review</div><div class="metric" id="review">—</div><div class="muted small">Claimed payments</div></div>
+<div class="card"><div class="muted small">Checked in</div><div class="metric" id="checked">—</div><div class="muted small">Individual tickets</div></div></div>
+<div class="two"><div class="card"><h2>Venue capacity</h2><div class="muted small" id="occupancy"></div><div class="bar"><div id="progress" class="fill" style="width:0"></div></div><p class="muted small">Capacity counts confirmed paid tickets; pending holds are not included in this chart.</p><h2 style="margin-top:30px">Promoter campaign</h2><div id="promo" class="muted"></div></div>
+<div class="card"><h2>Recent activity</h2><div id="activity" class="muted small">Loading…</div></div></div>
+</section>
+<section id="orders" class="hidden"><div class="card"><h2>Orders and guest list</h2><div class="toolbar"><input id="search" placeholder="Search name, order ID or Telegram ID"><select id="filter"><option value="">All statuses</option><option value="review">Review</option><option value="review_late">Late review</option><option value="paid">Paid</option><option value="pending">Pending</option><option value="expired">Expired</option><option value="rejected">Rejected</option><option value="void">Void</option></select><button class="btn" id="refresh">Refresh</button></div><div class="tablewrap"><table><thead><tr><th>Order</th><th>Name</th><th>Qty</th><th>Total</th><th>Status</th><th>Promoter</th></tr></thead><tbody id="order-body"></tbody></table></div></div></section>
+<section id="scanner" class="hidden"><div class="card"><h2>Door scanner</h2><p class="muted small">Scanning a valid unused QR admits the guest immediately. Double scans are blocked by the existing ledger. Test using a database copy first.</p><video id="video" muted playsinline></video><div class="toolbar" style="margin-top:12px"><button id="start" class="btn primary">Start camera</button><button id="stop" class="btn">Stop camera</button></div><div class="toolbar"><input id="manual" placeholder="Paste ticket QR URL or token"><button id="submit-scan" class="btn">Check in</button></div><div id="scanresult" class="scanresult muted">No ticket scanned.</div></div></section>
+<section id="payments" class="hidden"><div class="card"><h2>Bank payment approval</h2><p>Owner verification → authorized admin approval → ticket delivery.</p><p class="muted">This module is intentionally locked in this first build. The existing /approve command combines verification and ticket issuance. We must split those operations and gate the Telegram command before safely enabling multi-admin dashboard approvals.</p><button class="btn" disabled>Approval actions coming in next P0 slice</button></div></section>
+<div class="footer">DND Nights · P0 staging build · Existing bot is unchanged</div>
+</main></div>
+<script>
+const $=id=>document.getElementById(id);let stream=null,scanBusy=false,scannerTimer=null,lastScan="";
+function showError(message){$("banner").textContent=String(message);$("banner").classList.remove("hidden")}
+function clearError(){$("banner").classList.add("hidden")}
+async function api(url,options={}){const r=await fetch(url,{credentials:"same-origin",...options});const data=await r.json();if(!r.ok)throw Error(data.detail||"Request failed");return data}
+function node(tag,value){const el=document.createElement(tag);el.textContent=String(value??"");return el}
+async function authDone(user){try{await api("/api/auth/telegram",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(user)});location.reload()}catch(e){alert(e.message)}}
+window.onTelegramAuth=authDone;
+async function startApp(){const config=await api("/api/config");if(config.bot_name){let script=document.createElement("script");script.async=true;script.src="https://telegram.org/js/telegram-widget.js?22";script.setAttribute("data-telegram-login",config.bot_name);script.setAttribute("data-size","large");script.setAttribute("data-userpic","false");script.setAttribute("data-onauth","onTelegramAuth(user)");script.setAttribute("data-request-access","write");$("login-widget").append(script)}
+try{const me=await api("/api/me");$("login").classList.add("hidden");$("shell").classList.remove("hidden");$("who").textContent=me.name+" · "+me.role;await overview()}catch(e){if(!e.message.includes("Not signed in"))showError(e.message)}}
+async function overview(){try{clearError();const d=await api("/api/overview");$("sold").textContent=d.paid_tickets;$("capacity").textContent="of "+d.capacity+" spots";$("revenue").textContent="S$"+(d.revenue_cents/100).toFixed(2);$("review").textContent=d.pending_review;$("checked").textContent=d.checkins;$("occupancy").textContent=d.paid_tickets+" / "+d.capacity+" confirmed spots";$("progress").style.width=Math.min(100,d.paid_tickets/d.capacity*100)+"%";$("promo").textContent=d.campaign.approved+" / 100 first-100 positions filled · "+d.campaign.drinks_granted+" free drinks granted";$("activity").replaceChildren(...d.activity.map(a=>{let el=document.createElement("div");el.className="activity";let dot=document.createElement("div");dot.className="dot";let info=document.createElement("div");info.append(node("div",a.action.replaceAll("_"," ")+" · "+(a.serial||"Event")),node("div",a.created_at));el.append(dot,info);return el}))}catch(e){showError(e.message)}}
+async function orders(){try{clearError();const d=await api("/api/orders?status="+encodeURIComponent($("filter").value)+"&q="+encodeURIComponent($("search").value));$("order-body").replaceChildren(...d.orders.map(r=>{const tr=document.createElement("tr");[r.serial,r.name,r.quantity,"S$"+(r.total_cents/100).toFixed(2),r.status,r.promoter_code].forEach((v,i)=>{const td=node("td",v);if(i===4){const s=node("span",v);s.className="status";td.replaceChildren(s)}tr.append(td)});return tr}))}catch(e){showError(e.message)}}
+function page(p){for(const s of ["overview","orders","scanner","payments"])$(s).classList.toggle("hidden",p!==s);document.querySelectorAll("[data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===p));$("title").textContent=({overview:"Overview",orders:"Orders & Guests",scanner:"QR Scanner",payments:"Payments"})[p];if(p==="overview")overview();if(p==="orders")orders();if(p!=="scanner")stopCamera()}
+document.querySelectorAll("[data-page]").forEach(b=>b.onclick=()=>page(b.dataset.page));$("filter").onchange=orders;$("search").oninput=()=>orders();$("refresh").onclick=orders;
+$("logout").onclick=async()=>{try{await api("/api/logout",{method:"POST"})}finally{location.reload()}};
+function stopCamera(){if(scannerTimer)clearInterval(scannerTimer);scannerTimer=null;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$("video").srcObject=null}
+async function admit(raw){if(scanBusy)return;scanBusy=true;try{const result=await api("/api/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({qr:raw,request_id:crypto.randomUUID()})});$("scanresult").textContent=(result.status||"unknown").toUpperCase()+" · Ticket #"+(result.label||"—")+" · "+(result.booker_name||"")+" · "+(result.serial||"");$("scanresult").style.color=result.status==="admitted"?"#94d4a7":"#edb15a"}catch(e){$("scanresult").textContent=e.message;$("scanresult").style.color="#eaa19a"}finally{scanBusy=false}}
+$("submit-scan").onclick=()=>admit($("manual").value.trim());
+$("start").onclick=async()=>{try{if(!("BarcodeDetector" in window))throw Error("Camera QR detection is unavailable in this browser. Use manual QR entry or a compatible mobile browser.");const det=new BarcodeDetector({formats:["qr_code"]});stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});$("video").srcObject=stream;await $("video").play();scannerTimer=setInterval(async()=>{if(scanBusy||!stream||$("video").readyState<2)return;try{const codes=await det.detect($("video"));if(codes.length&&codes[0].rawValue!==lastScan){lastScan=codes[0].rawValue;await admit(lastScan);setTimeout(()=>lastScan="",2500)}}catch(e){}},400)}catch(e){showError(e.message);stopCamera()}};
+$("stop").onclick=stopCamera;startApp().catch(e=>showError(e.message));
+</script></body></html>
